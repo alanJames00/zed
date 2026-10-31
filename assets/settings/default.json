@@ -2295,6 +2295,8 @@
     // Whether to show a badge on the terminal panel icon with the count of open terminals.
     "show_count_badge": false,
     // Where to show the list of open terminals in the terminal panel.
+    // The vertical list is only shown when more than one terminal is open;
+    // otherwise the tab bar is shown.
     // May take 3 values:
     //  1. A horizontal tab bar above each pane
     //         "tabs": "top"

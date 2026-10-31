@@ -347,6 +347,8 @@ pub(crate) struct SerializedTerminalPanel {
     pub items: SerializedItems,
     // A deprecated field, kept for backwards compatibility for the code before terminal splits were introduced.
     pub active_item_id: Option<u64>,
+    #[serde(default)]
+    pub terminal_list_width: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

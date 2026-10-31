@@ -4765,7 +4765,7 @@ List of `integer` column numbers
 
 ### Terminal: Tabs
 
-- Description: Where to show the list of open terminals in the terminal panel
+- Description: Where to show the list of open terminals in the terminal panel. The vertical list is only shown when more than one terminal is open; otherwise the tab bar is shown.
 - Setting: `tabs`
 - Default: `top`
 
