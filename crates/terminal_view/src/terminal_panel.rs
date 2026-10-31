@@ -18,11 +18,11 @@ use gpui::{
 use itertools::Itertools;
 use project::{Fs, Project};
 
-use settings::{Settings, TerminalDockPosition};
+use settings::{Settings, TerminalDockPosition, TerminalTabsLocation};
 use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId};
 use terminal::{Terminal, terminal_settings::TerminalSettings};
 use ui::{
-    ButtonLike, Clickable, CommonAnimationExt, ContextMenu, FluentBuilder, PopoverMenu,
+    ButtonLike, Clickable, CommonAnimationExt, ContextMenu, FluentBuilder, ListItem, PopoverMenu,
     SplitButton, Toggleable, Tooltip, prelude::*,
 };
 use util::{ResultExt, TryFutureExt, defer};
@@ -30,10 +30,10 @@ use workspace::{
     ActivateNextPane, ActivatePane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
     ActivatePaneUp, ActivatePreviousPane, DraggedTab, ItemId, MoveItemToPane,
     MoveItemToPaneInDirection, MovePaneDown, MovePaneLeft, MovePaneRight, MovePaneUp, Pane,
-    PaneGroup, SplitDirection, SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp, SwapPaneDown,
-    SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleZoom, Workspace,
+    PaneGroup, SaveIntent, SplitDirection, SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp,
+    SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleZoom, Workspace,
     dock::{DockPosition, Panel, PanelEvent, PanelHandle},
-    item::SerializableItem,
+    item::{SerializableItem, TabContentParams},
     move_active_item, pane,
 };
 
@@ -41,6 +41,7 @@ use anyhow::{Result, anyhow};
 use zed_actions::assistant::InlineAssist;
 
 const TERMINAL_PANEL_KEY: &str = "TerminalPanel";
+const TERMINAL_LIST_WIDTH: Pixels = px(200.);
 
 actions!(
     terminal_panel,
@@ -1269,6 +1270,99 @@ impl TerminalPanel {
         }
     }
 
+    fn render_terminal_list(
+        &self,
+        tabs_location: TerminalTabsLocation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut rows = Vec::new();
+        for pane in self.center.panes() {
+            let pane_is_active = *pane == self.active_pane;
+            let (active_item_index, deemphasized, items) = {
+                let pane = pane.read(cx);
+                (
+                    pane.active_item_index(),
+                    !pane.has_focus(window, cx),
+                    pane.items()
+                        .map(|item| item.boxed_clone())
+                        .collect::<Vec<_>>(),
+                )
+            };
+
+            for (item_index, item) in items.into_iter().enumerate() {
+                let row_index = rows.len();
+                let item_id = item.item_id();
+                let is_visible = item_index == active_item_index;
+                let label = item.tab_content(
+                    TabContentParams {
+                        detail: None,
+                        selected: is_visible,
+                        preview: false,
+                        deemphasized,
+                        max_title_len: None,
+                        truncate_title_middle: false,
+                    },
+                    window,
+                    cx,
+                );
+
+                let close_button =
+                    IconButton::new(("terminal-list-close", item_id), IconName::Close)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(Tooltip::text("Close Terminal"))
+                        .on_click({
+                            let pane = pane.clone();
+                            move |_, window, cx| {
+                                cx.stop_propagation();
+                                pane.update(cx, |pane, cx| {
+                                    pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
+                                })
+                                .detach_and_log_err(cx);
+                            }
+                        });
+
+                rows.push(
+                    div()
+                        .debug_selector(|| format!("terminal-list-item-{row_index}"))
+                        .child(
+                            ListItem::new(("terminal-list-item", item_id))
+                                .toggle_state(pane_is_active && is_visible)
+                                .child(label)
+                                .end_slot_on_hover(close_button)
+                                .on_click({
+                                    let pane = pane.clone();
+                                    move |_, window, cx| {
+                                        pane.update(cx, |pane, cx| {
+                                            if let Some(index) = pane.index_for_item(item.as_ref())
+                                            {
+                                                pane.activate_item(index, true, true, window, cx);
+                                            }
+                                        });
+                                    }
+                                }),
+                        ),
+                );
+            }
+        }
+
+        v_flex()
+            .id("terminal-list")
+            .flex_none()
+            .w(TERMINAL_LIST_WIDTH)
+            .h_full()
+            .overflow_y_scroll()
+            .bg(cx.theme().colors().panel_background)
+            .border_color(cx.theme().colors().border)
+            .map(|this| match tabs_location {
+                TerminalTabsLocation::Left => this.border_r_1(),
+                TerminalTabsLocation::Top | TerminalTabsLocation::Right => this.border_l_1(),
+            })
+            .children(rows)
+            .into_any_element()
+    }
+
     fn move_pane_to_border(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
         if self
             .center
@@ -1326,7 +1420,9 @@ pub fn new_terminal_pane(
         pane.set_zoomed(zoomed, cx);
         pane.set_can_navigate(false, cx);
         pane.display_nav_history_buttons(None);
-        pane.set_should_display_tab_bar(|_, _| true);
+        pane.set_should_display_tab_bar(|_, cx| {
+            TerminalSettings::get_global(cx).tabs == TerminalTabsLocation::Top
+        });
         pane.set_zoom_out_on_close(false);
 
         let split_closure_terminal_panel = terminal_panel.downgrade();
@@ -1503,26 +1599,40 @@ impl Render for TerminalPanel {
                 )
                 .child(Label::new(label).color(Color::Muted))
         });
+        let tabs_location = TerminalSettings::get_global(cx).tabs;
+        let terminal_list = (tabs_location != TerminalTabsLocation::Top)
+            .then(|| self.render_terminal_list(tabs_location, window, cx));
         self.workspace
             .update(cx, |workspace, cx| {
+                let follower_states = HashMap::default();
+                let weak_workspace = workspace.weak_handle();
+                let render_context = workspace::PaneRenderContext {
+                    follower_states: &follower_states,
+                    active_call: workspace.active_call(),
+                    active_pane: &self.active_pane,
+                    app_state: workspace.app_state(),
+                    project: workspace.project(),
+                    workspace: &weak_workspace,
+                };
+                let center =
+                    self.center
+                        .render(workspace.zoomed_item(), None, &render_context, window, cx);
                 registrar
                     .track_focus(&self.focus_handle)
                     .size_full()
                     .relative()
-                    .child(self.center.render(
-                        workspace.zoomed_item(),
-                        None,
-                        &workspace::PaneRenderContext {
-                            follower_states: &HashMap::default(),
-                            active_call: workspace.active_call(),
-                            active_pane: &self.active_pane,
-                            app_state: workspace.app_state(),
-                            project: workspace.project(),
-                            workspace: &workspace.weak_handle(),
-                        },
-                        window,
-                        cx,
-                    ))
+                    .map(|this| match terminal_list {
+                        None => this.child(center),
+                        Some(terminal_list) => {
+                            let center = div().flex_1().min_w_0().h_full().child(center);
+                            let content = h_flex().size_full();
+                            this.child(if tabs_location == TerminalTabsLocation::Left {
+                                content.child(terminal_list).child(center)
+                            } else {
+                                content.child(center).child(terminal_list)
+                            })
+                        }
+                    })
                     .children(restoring_placeholder)
             })
             .ok()
@@ -2939,6 +3049,79 @@ mod tests {
                 });
             })
             .expect("Failed to read configured terminal panel starts_open");
+    }
+
+    #[gpui::test]
+    async fn test_vertical_terminal_list_activates_clicked_terminal(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        for _ in 0..2 {
+            terminal_panel
+                .update_in(cx, |terminal_panel, window, cx| {
+                    terminal_panel.add_terminal_shell(
+                        false,
+                        None,
+                        RevealStrategy::Always,
+                        window,
+                        cx,
+                    )
+                })
+                .await
+                .expect("Failed to spawn a panel terminal");
+        }
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("terminal-list-item-0").is_none(),
+            "the vertical terminal list should not be rendered with the default tab bar"
+        );
+
+        let first_terminal_id = terminal_panel.read_with(cx, |terminal_panel, cx| {
+            let pane = terminal_panel.active_pane.read(cx);
+            assert_eq!(pane.items_len(), 2);
+            assert_eq!(
+                pane.active_item_index(),
+                1,
+                "the most recently added terminal should be active"
+            );
+            pane.item_for_index(0)
+                .expect("the first terminal should exist")
+                .item_id()
+        });
+
+        cx.update(|window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.terminal.get_or_insert_default().tabs =
+                        Some(TerminalTabsLocation::Right);
+                });
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        let first_row_bounds = cx
+            .debug_bounds("terminal-list-item-0")
+            .expect("the vertical terminal list should be rendered");
+        cx.simulate_click(first_row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        terminal_panel.read_with(cx, |terminal_panel, cx| {
+            let active_item = terminal_panel
+                .active_pane
+                .read(cx)
+                .active_item()
+                .expect("the panel should have an active terminal");
+            assert_eq!(
+                active_item.item_id(),
+                first_terminal_id,
+                "clicking a row in the vertical terminal list should activate its terminal"
+            );
+        });
     }
 
     #[gpui::test]

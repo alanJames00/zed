@@ -982,6 +982,11 @@ impl VsCodeSettings {
             scroll_multiplier: None,
             toolbar: None,
             show_count_badge: None,
+            tabs: self.read_enum("terminal.integrated.tabs.location", |s| match s {
+                "left" => Some(TerminalTabsLocation::Left),
+                "right" => Some(TerminalTabsLocation::Right),
+                _ => None,
+            }),
             flexible: None,
         })
     }

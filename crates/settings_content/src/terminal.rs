@@ -232,6 +232,10 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: false
     pub show_count_badge: Option<bool>,
+    /// Where to show the list of open terminals in the terminal panel.
+    ///
+    /// Default: top
+    pub tabs: Option<TerminalTabsLocation>,
     /// What to do when the `BEL` character (`\a`) is printed to terminal.
     ///
     /// Default: "system"
@@ -245,7 +249,7 @@ crate::fallible_options::flattened_deserialize!(TerminalSettingsContent {
         cursor_shape, blinking, alternate_scroll, option_as_meta, copy_on_select,
         keep_selection_on_copy, open_links_in_mouse_mode, button, dock, starts_open, flexible,
         default_width, default_height, max_scroll_history_lines, scroll_multiplier, toolbar,
-        scrollbar, minimum_contrast, show_count_badge, bell,
+        scrollbar, minimum_contrast, show_count_badge, tabs, bell,
     },
     defaults: {},
 });
@@ -609,6 +613,31 @@ impl PathHyperlinkRegex {
 pub enum TerminalDockPosition {
     Left,
     Bottom,
+    Right,
+}
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalTabsLocation {
+    /// Show terminals as tabs in a horizontal tab bar above each pane.
+    #[default]
+    Top,
+    /// Show terminals in a vertical list on the left side of the panel.
+    Left,
+    /// Show terminals in a vertical list on the right side of the panel.
     Right,
 }
 
