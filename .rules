@@ -188,3 +188,25 @@ Rules emerge from validated patterns, not one-off observations. The workflow is:
 1. Agent notes a pattern during a session.
 2. Team validates the pattern in code review.
 3. A dedicated commit adds the rule with context on *why* it exists.
+
+# Code exploration with code-review-graph
+
+This is a very large codebase. A local knowledge graph (Tree-sitter, stored in `.code-review-graph/`) is exposed through the `code-review-graph` MCP server. Prefer it over raw `grep`/`rg`/`find` for browsing and understanding code. Fall back to grep only when the graph cannot answer, for example macro-generated code, trait-method calls that show up as unresolved, string literals, or non-source files.
+
+| Question | Tool |
+|---|---|
+| Where is X defined? What is related to this idea? | `semantic_search_nodes_tool` (filter with `kind`: Function, Class, Type, Test) |
+| Who calls X? What does X call? Tests for X? What is in this file? | `query_graph_tool` with `callers_of`, `callees_of`, `tests_for`, `file_summary`, `importers_of`, `inheritors_of` |
+| What breaks if I change this? | `get_impact_radius_tool` |
+| Review a diff | `detect_changes_tool`, `get_review_context_tool` |
+| Refactor or rename safely | `refactor_tool`, then `apply_refactor_tool` |
+| Graph health | `list_graph_stats_tool` |
+
+Skills are available for common workflows: `explore-codebase`, `debug-issue`, `refactor-safely`, `review-changes`.
+
+Usage notes:
+* Names are often ambiguous (many `new`, `render`, `prompt_for_open_path`). If a query returns candidates, rerun it with the full `qualified_name` of the one you want.
+* Use `detail_level: "minimal"` unless the full detail is needed.
+* Check `resolution_split` on call results. A large `unresolved` count means the list is incomplete, so confirm with grep before relying on it.
+* The graph is updated by hooks and the git pre-commit hook. If results look stale (`head_matches_build: false` in `_graph`), run `code-review-graph update`. Embeddings for semantic search are refreshed with `code-review-graph embed --provider local`.
+* Binary: `~/.local/share/code-review-graph/venv/bin/code-review-graph`. Reference: https://github.com/tirth8205/code-review-graph
