@@ -176,8 +176,9 @@ impl TerminalPanel {
 
     /// Visibility is cached rather than computed on demand because the panes' tab bar
     /// predicates read it while a pane is rendering, when that pane cannot be read to count
-    /// its terminals.
-    fn update_terminal_list_visibility(&mut self, cx: &mut Context<Self>) {
+    /// its terminals. Pane events keep it current, so code that replaces `center` directly
+    /// must call this afterwards.
+    pub(crate) fn update_terminal_list_visibility(&mut self, cx: &mut Context<Self>) {
         let visible = TerminalSettings::get_global(cx).tabs != TerminalTabsLocation::Top
             && self.terminal_count(cx) > 1;
         if visible == self.terminal_list_visible {
@@ -2241,9 +2242,9 @@ mod tests {
     use std::num::NonZero;
 
     use super::*;
-    use crate::persistence::{SerializedPane, SerializedPaneGroup};
+    use crate::persistence::{SerializedAxis, SerializedPane, SerializedPaneGroup};
     use gpui::{
-        EntityId, Modifiers, MouseDownEvent, Point, TestAppContext, UpdateGlobal as _,
+        Axis, EntityId, Modifiers, MouseDownEvent, Point, TestAppContext, UpdateGlobal as _,
         VisualTestContext, point,
     };
     use pretty_assertions::assert_eq;
@@ -2815,6 +2816,63 @@ mod tests {
                 "unfocused interim pane must not become the active pane"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_vertical_terminal_list_shown_after_split_restore(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.terminal.get_or_insert_default().tabs = Some(TerminalTabsLocation::Right);
+            });
+        });
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let restored_pane = |active| {
+            SerializedPaneGroup::Pane(SerializedPane {
+                active,
+                children: Vec::new(),
+                active_item: None,
+                pinned_count: 0,
+            })
+        };
+
+        let restored_items = window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                let workspace = multi_workspace.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                deserialize_terminal_panel(
+                    workspace.downgrade(),
+                    project,
+                    WorkspaceId::default(),
+                    SerializedTerminalPanel {
+                        items: SerializedItems::WithSplits(SerializedPaneGroup::Group {
+                            axis: SerializedAxis(Axis::Horizontal),
+                            flexes: None,
+                            children: vec![restored_pane(true), restored_pane(false)],
+                        }),
+                        active_item_id: None,
+                        terminal_list_width: None,
+                    },
+                    terminal_panel.downgrade(),
+                    window,
+                    cx,
+                )
+            })
+            .expect("Failed to start restoring the terminal panel")
+            .await
+            .expect("Failed to restore the terminal panel");
+        cx.run_until_parked();
+
+        assert_eq!(
+            restored_items, 2,
+            "each restored pane should get a terminal"
+        );
+        assert!(
+            terminal_panel.read_with(cx, |terminal_panel, _| terminal_panel.terminal_list_visible),
+            "the vertical terminal list should be shown for terminals restored on startup"
+        );
     }
 
     #[gpui::test]
