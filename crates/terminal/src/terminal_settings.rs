@@ -7,7 +7,7 @@ pub use settings::AlternateScroll;
 
 use settings::{
     IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBell, TerminalBlink,
-    TerminalDockPosition, TerminalLineHeight, VenvSettings, WorkingDirectory,
+    TerminalDockPosition, TerminalLineHeight, TerminalTabsLocation, VenvSettings, WorkingDirectory,
     merge_from::MergeFrom,
 };
 use task::Shell;
@@ -51,6 +51,7 @@ pub struct TerminalSettings {
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
     pub show_count_badge: bool,
+    pub tabs: TerminalTabsLocation,
     pub bell: TerminalBell,
 }
 
@@ -136,6 +137,7 @@ impl settings::Settings for TerminalSettings {
                 .collect(),
             path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
             show_count_badge: user_content.show_count_badge.unwrap(),
+            tabs: user_content.tabs.unwrap(),
             bell: user_content.bell.unwrap(),
         }
     }

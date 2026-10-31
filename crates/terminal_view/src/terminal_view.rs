@@ -1636,7 +1636,11 @@ impl Item for TerminalView {
         };
 
         let self_handle = self.self_handle.clone();
+        // Growing has no effect in a horizontal tab, which is sized to its content, but in the
+        // terminal panel's vertical list it stretches the title, and the rename editor laid over
+        // it, across the row instead of leaving the editor as narrow as the old title.
         h_flex()
+            .flex_grow_1()
             .gap_1()
             .group("term-tab-icon")
             .when(!params.selected, |this| {
@@ -1669,6 +1673,7 @@ impl Item for TerminalView {
             .child(
                 div()
                     .relative()
+                    .flex_grow_1()
                     .child(
                         Label::new(title)
                             .single_line()
@@ -1680,6 +1685,7 @@ impl Item for TerminalView {
                         let self_handle_cancel = self.self_handle.clone();
                         this.child(
                             div()
+                                .debug_selector(|| "terminal-rename-editor".into())
                                 .absolute()
                                 .top_0()
                                 .left_0()

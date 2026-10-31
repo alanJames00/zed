@@ -11,29 +11,29 @@ use collections::HashMap;
 use db::kvp::KeyValueStore;
 use futures::{channel::oneshot, future::join_all};
 use gpui::{
-    Action, Anchor, App, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, ParentElement, Pixels, Render, Styled, Task, TaskExt, WeakEntity,
-    Window, actions,
+    Action, Anchor, App, AsyncApp, AsyncWindowContext, Context, DragMoveEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseUpEvent, ParentElement,
+    Pixels, Render, Styled, Subscription, Task, TaskExt, WeakEntity, Window, actions, deferred,
 };
 use itertools::Itertools;
 use project::{Fs, Project};
 
-use settings::{Settings, TerminalDockPosition};
+use settings::{Settings, SettingsStore, TerminalDockPosition, TerminalTabsLocation};
 use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId};
 use terminal::{Terminal, terminal_settings::TerminalSettings};
 use ui::{
-    ButtonLike, Clickable, CommonAnimationExt, ContextMenu, FluentBuilder, PopoverMenu,
-    SplitButton, Toggleable, Tooltip, prelude::*,
+    ButtonLike, Clickable, CommonAnimationExt, ContextMenu, FluentBuilder, ListItem, PopoverMenu,
+    SplitButton, Tab, Toggleable, Tooltip, prelude::*, right_click_menu,
 };
 use util::{ResultExt, TryFutureExt, defer};
 use workspace::{
     ActivateNextPane, ActivatePane, ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight,
     ActivatePaneUp, ActivatePreviousPane, DraggedTab, ItemId, MoveItemToPane,
     MoveItemToPaneInDirection, MovePaneDown, MovePaneLeft, MovePaneRight, MovePaneUp, Pane,
-    PaneGroup, SplitDirection, SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp, SwapPaneDown,
-    SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleZoom, Workspace,
+    PaneGroup, SaveIntent, SplitDirection, SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp,
+    SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleZoom, Workspace,
     dock::{DockPosition, Panel, PanelEvent, PanelHandle},
-    item::SerializableItem,
+    item::{SerializableItem, TabContentParams},
     move_active_item, pane,
 };
 
@@ -41,6 +41,10 @@ use anyhow::{Result, anyhow};
 use zed_actions::assistant::InlineAssist;
 
 const TERMINAL_PANEL_KEY: &str = "TerminalPanel";
+const DEFAULT_TERMINAL_LIST_WIDTH: Pixels = px(200.);
+const MIN_TERMINAL_LIST_WIDTH: Pixels = px(100.);
+const MIN_TERMINAL_WIDTH_BESIDE_LIST: Pixels = px(200.);
+const TERMINAL_LIST_RESIZE_HANDLE_WIDTH: Pixels = px(6.);
 
 actions!(
     terminal_panel,
@@ -87,6 +91,18 @@ pub struct TerminalPanel {
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
     active: bool,
+    terminal_list_visible: bool,
+    terminal_list_width: Pixels,
+    _settings_subscription: Subscription,
+}
+
+#[derive(Clone)]
+struct DraggedTerminalListResize;
+
+impl Render for DraggedTerminalListResize {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
 }
 
 impl TerminalPanel {
@@ -94,6 +110,9 @@ impl TerminalPanel {
         let project = workspace.project();
         let pane = new_terminal_pane(workspace.weak_handle(), project.clone(), false, window, cx);
         let center = PaneGroup::new(pane.clone());
+        let settings_subscription = cx.observe_global::<SettingsStore>(|terminal_panel, cx| {
+            terminal_panel.update_terminal_list_visibility(cx);
+        });
         let terminal_panel = Self {
             center,
             active_pane: pane,
@@ -107,6 +126,9 @@ impl TerminalPanel {
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             active: false,
+            terminal_list_visible: false,
+            terminal_list_width: DEFAULT_TERMINAL_LIST_WIDTH,
+            _settings_subscription: settings_subscription,
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
@@ -127,10 +149,6 @@ impl TerminalPanel {
         let assistant_enabled = self.assistant_enabled;
         terminal_pane.update(cx, |pane, cx| {
             pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
-                let split_context = pane
-                    .active_item()
-                    .and_then(|item| item.downcast::<TerminalView>())
-                    .map(|terminal_view| terminal_view.read(cx).focus_handle.clone());
                 let has_focused_rename_editor = pane
                     .active_item()
                     .and_then(|item| item.downcast::<TerminalView>())
@@ -141,89 +159,55 @@ impl TerminalPanel {
                 {
                     return (None, None);
                 }
-                let focus_handle = pane.focus_handle(cx);
-                let right_children = h_flex()
-                    .gap(DynamicSpacing::Base02.rems(cx))
-                    .child(
-                        PopoverMenu::new("terminal-tab-bar-popover-menu")
-                            .trigger_with_tooltip(
-                                IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
-                                Tooltip::text("New…"),
-                            )
-                            .anchor(Anchor::TopRight)
-                            .with_handle(pane.new_item_context_menu_handle.clone())
-                            .menu(move |window, cx| {
-                                let focus_handle = focus_handle.clone();
-                                let menu = ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.context(focus_handle.clone())
-                                        .action(
-                                            "New Terminal",
-                                            workspace::NewTerminal::default().boxed_clone(),
-                                        )
-                                        // We want the focus to go back to terminal panel once task modal is dismissed,
-                                        // hence we focus that first. Otherwise, we'd end up without a focused element, as
-                                        // context menu will be gone the moment we spawn the modal.
-                                        .action(
-                                            "Spawn Task",
-                                            zed_actions::Spawn::modal().boxed_clone(),
-                                        )
-                                });
-
-                                Some(menu)
-                            }),
-                    )
-                    .when(assistant_enabled, |this| {
-                        this.when_some(split_context.clone(), |this, focus_handle| {
-                            this.child(InlineAssistTabBarButton { focus_handle })
-                        })
-                    })
-                    .child(
-                        PopoverMenu::new("terminal-pane-tab-bar-split")
-                            .trigger_with_tooltip(
-                                IconButton::new("terminal-pane-split", IconName::Split)
-                                    .icon_size(IconSize::Small),
-                                Tooltip::text("Split Pane"),
-                            )
-                            .anchor(Anchor::TopRight)
-                            .with_handle(pane.split_item_context_menu_handle.clone())
-                            .menu({
-                                move |window, cx| {
-                                    ContextMenu::build(window, cx, |menu, _, _| {
-                                        menu.when_some(
-                                            split_context.clone(),
-                                            |menu, split_context| menu.context(split_context),
-                                        )
-                                        .action("Split Right", SplitRight::default().boxed_clone())
-                                        .action("Split Left", SplitLeft::default().boxed_clone())
-                                        .action("Split Up", SplitUp::default().boxed_clone())
-                                        .action("Split Down", SplitDown::default().boxed_clone())
-                                    })
-                                    .into()
-                                }
-                            }),
-                    )
-                    .child({
-                        let zoomed = pane.is_zoomed();
-                        IconButton::new("toggle_zoom", IconName::Maximize)
-                            .icon_size(IconSize::Small)
-                            .toggle_state(zoomed)
-                            .selected_icon(IconName::Minimize)
-                            .on_click(cx.listener(|pane, _, window, cx| {
-                                pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
-                            }))
-                            .tooltip(move |_window, cx| {
-                                Tooltip::for_action(
-                                    if zoomed { "Zoom Out" } else { "Zoom In" },
-                                    &ToggleZoom,
-                                    cx,
-                                )
-                            })
-                    })
-                    .into_any_element()
-                    .into();
+                let right_children =
+                    render_pane_buttons(pane, cx.entity(), assistant_enabled, cx).into();
                 (None, right_children)
             });
         });
+    }
+
+    fn terminal_count(&self, cx: &App) -> usize {
+        self.center
+            .panes()
+            .into_iter()
+            .map(|pane| pane.read(cx).items_len())
+            .sum()
+    }
+
+    /// Visibility is cached rather than computed on demand because the panes' tab bar
+    /// predicates read it while a pane is rendering, when that pane cannot be read to count
+    /// its terminals.
+    fn update_terminal_list_visibility(&mut self, cx: &mut Context<Self>) {
+        let visible = TerminalSettings::get_global(cx).tabs != TerminalTabsLocation::Top
+            && self.terminal_count(cx) > 1;
+        if visible == self.terminal_list_visible {
+            return;
+        }
+        self.terminal_list_visible = visible;
+        for pane in self.center.panes() {
+            pane.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
+    fn resize_terminal_list(
+        &mut self,
+        width: Pixels,
+        available_width: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let max_width =
+            (available_width - MIN_TERMINAL_WIDTH_BESIDE_LIST).max(MIN_TERMINAL_LIST_WIDTH);
+        self.set_terminal_list_width(width.max(MIN_TERMINAL_LIST_WIDTH).min(max_width), cx);
+    }
+
+    fn set_terminal_list_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        let width = width.round();
+        if width != self.terminal_list_width {
+            self.terminal_list_width = width;
+            self.serialize(cx);
+            cx.notify();
+        }
     }
 
     fn serialization_key(workspace: &Workspace) -> Option<String> {
@@ -333,6 +317,15 @@ impl TerminalPanel {
                 .log_err()
                 .flatten()
         {
+            if let Some(terminal_list_width) = serialized_panel.terminal_list_width {
+                terminal_panel
+                    .update(cx, |terminal_panel, cx| {
+                        terminal_panel.terminal_list_width =
+                            px(terminal_list_width).max(MIN_TERMINAL_LIST_WIDTH).round();
+                        cx.notify();
+                    })
+                    .log_err();
+            }
             let started_at = std::time::Instant::now();
             let deserialized = workspace
                 .update_in(cx, |workspace, window, cx| {
@@ -434,10 +427,14 @@ impl TerminalPanel {
     ) {
         match event {
             pane::Event::ActivateItem { .. } => self.serialize(cx),
-            pane::Event::RemovedItem { .. } => self.serialize(cx),
+            pane::Event::RemovedItem { .. } => {
+                self.update_terminal_list_visibility(cx);
+                self.serialize(cx);
+            }
             pane::Event::Remove { focus_on_pane } => {
                 let pane_count_before_removal = self.center.panes().len();
                 let _removal_result = self.center.remove(pane, cx);
+                self.update_terminal_list_visibility(cx);
                 if pane_count_before_removal == 1 {
                     self.center.first_pane().update(cx, |pane, cx| {
                         pane.set_zoomed(false, cx);
@@ -473,6 +470,7 @@ impl TerminalPanel {
                         item.added_to_pane(workspace, pane.clone(), window, cx)
                     })
                 }
+                self.update_terminal_list_visibility(cx);
                 self.serialize(cx);
             }
             &pane::Event::Split { direction, mode } => {
@@ -1067,12 +1065,15 @@ impl TerminalPanel {
                 .timer(Duration::from_millis(50))
                 .await;
             let terminal_panel = terminal_panel.upgrade()?;
-            let items = terminal_panel.update(cx, |terminal_panel, cx| {
-                SerializedItems::WithSplits(serialize_pane_group(
-                    &terminal_panel.center,
-                    &terminal_panel.active_pane,
-                    cx,
-                ))
+            let (items, terminal_list_width) = terminal_panel.update(cx, |terminal_panel, cx| {
+                (
+                    SerializedItems::WithSplits(serialize_pane_group(
+                        &terminal_panel.center,
+                        &terminal_panel.active_pane,
+                        cx,
+                    )),
+                    terminal_panel.terminal_list_width.as_f32(),
+                )
             });
             cx.background_spawn(
                 async move {
@@ -1081,6 +1082,7 @@ impl TerminalPanel {
                         serde_json::to_string(&SerializedTerminalPanel {
                             items,
                             active_item_id: None,
+                            terminal_list_width: Some(terminal_list_width),
                         })?,
                     )
                     .await?;
@@ -1269,6 +1271,242 @@ impl TerminalPanel {
         }
     }
 
+    fn render_terminal_list(
+        &self,
+        tabs_location: TerminalTabsLocation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let panes = self.center.panes();
+        let is_split = panes.len() > 1;
+        let row_count = self.terminal_count(cx);
+        let mut rows = Vec::new();
+        for pane in panes {
+            let pane_is_active = *pane == self.active_pane;
+            let (active_item_index, deemphasized, items) = {
+                let pane = pane.read(cx);
+                (
+                    pane.active_item_index(),
+                    !pane.has_focus(window, cx),
+                    pane.items()
+                        .map(|item| item.boxed_clone())
+                        .collect::<Vec<_>>(),
+                )
+            };
+
+            for (item_index, item) in items.into_iter().enumerate() {
+                let row_index = rows.len();
+                let split_marker = is_split.then(|| {
+                    let marker = if row_index == 0 {
+                        "┌"
+                    } else if row_index + 1 == row_count {
+                        "└"
+                    } else {
+                        "├"
+                    };
+                    Label::new(marker).color(Color::Muted)
+                });
+                let item_id = item.item_id();
+                let is_visible = item_index == active_item_index;
+                let label = item.tab_content(
+                    TabContentParams {
+                        detail: None,
+                        selected: is_visible,
+                        preview: false,
+                        deemphasized,
+                        max_title_len: None,
+                        truncate_title_middle: false,
+                    },
+                    window,
+                    cx,
+                );
+
+                let close_button =
+                    IconButton::new(("terminal-list-close", item_id), IconName::Close)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(Tooltip::text("Close Terminal"))
+                        .on_click({
+                            let pane = pane.clone();
+                            move |_, window, cx| {
+                                cx.stop_propagation();
+                                pane.update(cx, |pane, cx| {
+                                    pane.close_item_by_id(item_id, SaveIntent::Close, window, cx)
+                                })
+                                .detach_and_log_err(cx);
+                            }
+                        });
+
+                let dragged_tab = DraggedTab {
+                    pane: pane.clone(),
+                    item: item.boxed_clone(),
+                    ix: item_index,
+                    detail: 0,
+                    is_active: is_visible,
+                };
+                let target_pane = pane.clone();
+                let has_context_menu_actions =
+                    !item.tab_extra_context_menu_actions(window, cx).is_empty();
+                let menu_item = item.boxed_clone();
+
+                let row = div()
+                    .id(("terminal-list-row", item_id))
+                    .debug_selector(|| format!("terminal-list-item-{row_index}"))
+                    .on_drag(dragged_tab, |tab, _, _, cx| cx.new(|_| tab.clone()))
+                    .drag_over::<DraggedTab>({
+                        let target_pane = target_pane.clone();
+                        move |style, dragged_tab: &DraggedTab, _, cx| {
+                            let style = style
+                                .bg(cx.theme().colors().drop_target_background)
+                                .border_color(cx.theme().colors().drop_target_border);
+                            // Within a pane, a terminal dragged downwards lands after the
+                            // target row; in every other case it lands before it.
+                            if dragged_tab.pane == target_pane && dragged_tab.ix < item_index {
+                                style.border_b_2()
+                            } else if dragged_tab.pane != target_pane || dragged_tab.ix > item_index
+                            {
+                                style.border_t_2()
+                            } else {
+                                style
+                            }
+                        }
+                    })
+                    .can_drop(|dragged, _, _| {
+                        dragged
+                            .downcast_ref::<DraggedTab>()
+                            .is_some_and(|tab| tab.item.downcast::<TerminalView>().is_some())
+                    })
+                    .on_drop(move |dragged_tab: &DraggedTab, window, cx| {
+                        target_pane.update(cx, |pane, cx| {
+                            // A drag that passed over the terminal area may have left a
+                            // split direction behind, which would turn this drop into a split.
+                            pane.drag_split_direction = None;
+                            pane.handle_tab_drop(dragged_tab, item_index, false, window, cx);
+                        });
+                    })
+                    .child(
+                        ListItem::new(("terminal-list-item", item_id))
+                            .toggle_state(pane_is_active && is_visible)
+                            .start_slot::<Label>(split_marker)
+                            .child(label)
+                            .end_slot_on_hover(close_button)
+                            .on_click({
+                                let pane = pane.clone();
+                                move |event, window, cx| {
+                                    if event.click_count() > 1
+                                        && let Some((_, rename_action)) = item
+                                            .tab_extra_context_menu_actions(window, cx)
+                                            .into_iter()
+                                            .find(|(label, _)| label.as_ref() == "Rename")
+                                    {
+                                        item.item_focus_handle(cx).dispatch_action(
+                                            &*rename_action,
+                                            window,
+                                            cx,
+                                        );
+                                        return;
+                                    }
+                                    pane.update(cx, |pane, cx| {
+                                        if let Some(index) = pane.index_for_item(item.as_ref()) {
+                                            pane.activate_item(index, true, true, window, cx);
+                                        }
+                                    });
+                                }
+                            }),
+                    );
+
+                rows.push(if has_context_menu_actions {
+                    right_click_menu(("terminal-list-menu", item_id))
+                        .trigger(move |_, _, _| row)
+                        .menu(move |window, cx| {
+                            let menu_context = menu_item.item_focus_handle(cx);
+                            let actions = menu_item.tab_extra_context_menu_actions(window, cx);
+                            ContextMenu::build(window, cx, move |menu, _, _| {
+                                actions
+                                    .into_iter()
+                                    .fold(menu, |menu, (label, action)| menu.action(label, action))
+                                    .context(menu_context)
+                            })
+                        })
+                        .into_any_element()
+                } else {
+                    row.into_any_element()
+                });
+            }
+        }
+
+        let header = h_flex()
+            .flex_none()
+            .h(Tab::container_height(cx))
+            .px_1()
+            .justify_end()
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .child(render_pane_buttons(
+                self.active_pane.read(cx),
+                self.active_pane.clone(),
+                self.assistant_enabled,
+                cx,
+            ));
+
+        let resize_handle = div()
+            .id("terminal-list-resize-handle")
+            .debug_selector(|| "terminal-list-resize-handle".into())
+            .absolute()
+            .top_0()
+            .h_full()
+            .w(TERMINAL_LIST_RESIZE_HANDLE_WIDTH)
+            // Offsets are measured from inside the list's 1px border, so include it to center the
+            // handle on the list's outer edge, where the width is measured from while dragging.
+            .map(|this| match tabs_location {
+                TerminalTabsLocation::Left => {
+                    this.right(-TERMINAL_LIST_RESIZE_HANDLE_WIDTH / 2. - px(1.))
+                }
+                TerminalTabsLocation::Top | TerminalTabsLocation::Right => {
+                    this.left(-TERMINAL_LIST_RESIZE_HANDLE_WIDTH / 2. - px(1.))
+                }
+            })
+            .cursor_col_resize()
+            .on_drag(DraggedTerminalListResize, |resize, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| resize.clone())
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|terminal_panel, event: &MouseUpEvent, _, cx| {
+                    if event.click_count == 2 {
+                        terminal_panel.set_terminal_list_width(DEFAULT_TERMINAL_LIST_WIDTH, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .occlude();
+
+        v_flex()
+            .relative()
+            .flex_none()
+            .w(self.terminal_list_width)
+            .h_full()
+            .bg(cx.theme().colors().panel_background)
+            .border_color(cx.theme().colors().border)
+            .map(|this| match tabs_location {
+                TerminalTabsLocation::Left => this.border_r_1(),
+                TerminalTabsLocation::Top | TerminalTabsLocation::Right => this.border_l_1(),
+            })
+            .child(deferred(resize_handle))
+            .child(header)
+            .child(
+                v_flex()
+                    .id("terminal-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
     fn move_pane_to_border(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
         if self
             .center
@@ -1326,7 +1564,14 @@ pub fn new_terminal_pane(
         pane.set_zoomed(zoomed, cx);
         pane.set_can_navigate(false, cx);
         pane.display_nav_history_buttons(None);
-        pane.set_should_display_tab_bar(|_, _| true);
+        let tab_bar_terminal_panel = terminal_panel.downgrade();
+        pane.set_should_display_tab_bar(move |_, cx| {
+            tab_bar_terminal_panel
+                .read_with(cx, |terminal_panel, _| {
+                    !terminal_panel.terminal_list_visible
+                })
+                .unwrap_or(true)
+        });
         pane.set_zoom_out_on_close(false);
 
         let split_closure_terminal_panel = terminal_panel.downgrade();
@@ -1503,26 +1748,54 @@ impl Render for TerminalPanel {
                 )
                 .child(Label::new(label).color(Color::Muted))
         });
+        let tabs_location = TerminalSettings::get_global(cx).tabs;
+        let terminal_list = self.terminal_list_visible.then(|| {
+            let terminal_list = self.render_terminal_list(tabs_location, window, cx);
+            let resize_terminal_list = cx.listener(
+                move |terminal_panel, event: &DragMoveEvent<DraggedTerminalListResize>, _, cx| {
+                    let bounds = event.bounds;
+                    let width = match tabs_location {
+                        TerminalTabsLocation::Left => event.event.position.x - bounds.left(),
+                        TerminalTabsLocation::Top | TerminalTabsLocation::Right => {
+                            bounds.right() - event.event.position.x
+                        }
+                    };
+                    terminal_panel.resize_terminal_list(width, bounds.size.width, cx);
+                },
+            );
+            (terminal_list, resize_terminal_list)
+        });
         self.workspace
             .update(cx, |workspace, cx| {
+                let follower_states = HashMap::default();
+                let weak_workspace = workspace.weak_handle();
+                let render_context = workspace::PaneRenderContext {
+                    follower_states: &follower_states,
+                    active_call: workspace.active_call(),
+                    active_pane: &self.active_pane,
+                    app_state: workspace.app_state(),
+                    project: workspace.project(),
+                    workspace: &weak_workspace,
+                };
+                let center =
+                    self.center
+                        .render(workspace.zoomed_item(), None, &render_context, window, cx);
                 registrar
                     .track_focus(&self.focus_handle)
                     .size_full()
                     .relative()
-                    .child(self.center.render(
-                        workspace.zoomed_item(),
-                        None,
-                        &workspace::PaneRenderContext {
-                            follower_states: &HashMap::default(),
-                            active_call: workspace.active_call(),
-                            active_pane: &self.active_pane,
-                            app_state: workspace.app_state(),
-                            project: workspace.project(),
-                            workspace: &workspace.weak_handle(),
-                        },
-                        window,
-                        cx,
-                    ))
+                    .map(|this| match terminal_list {
+                        None => this.child(center),
+                        Some((terminal_list, resize_terminal_list)) => {
+                            let center = div().flex_1().min_w_0().h_full().child(center);
+                            let content = h_flex().size_full().on_drag_move(resize_terminal_list);
+                            this.child(if tabs_location == TerminalTabsLocation::Left {
+                                content.child(terminal_list).child(center)
+                            } else {
+                                content.child(center).child(terminal_list)
+                            })
+                        }
+                    })
                     .children(restoring_placeholder)
             })
             .ok()
@@ -1850,6 +2123,97 @@ impl workspace::TerminalProvider for TerminalProvider {
     }
 }
 
+/// Takes the pane by reference because this is also called from the pane's own render, where
+/// reading `pane_handle` would panic. `pane_handle` is only used by click handlers.
+fn render_pane_buttons(
+    pane: &Pane,
+    pane_handle: Entity<Pane>,
+    assistant_enabled: bool,
+    cx: &App,
+) -> AnyElement {
+    let split_context = pane
+        .active_item()
+        .and_then(|item| item.downcast::<TerminalView>())
+        .map(|terminal_view| terminal_view.read(cx).focus_handle.clone());
+    let focus_handle = pane.focus_handle(cx);
+    let zoomed = pane.is_zoomed();
+    h_flex()
+        .gap(DynamicSpacing::Base02.rems(cx))
+        .child(
+            PopoverMenu::new("terminal-tab-bar-popover-menu")
+                .trigger_with_tooltip(
+                    IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
+                    Tooltip::text("New…"),
+                )
+                .anchor(Anchor::TopRight)
+                .with_handle(pane.new_item_context_menu_handle.clone())
+                .menu(move |window, cx| {
+                    let focus_handle = focus_handle.clone();
+                    let menu = ContextMenu::build(window, cx, |menu, _, _| {
+                        menu.context(focus_handle.clone())
+                            .action(
+                                "New Terminal",
+                                workspace::NewTerminal::default().boxed_clone(),
+                            )
+                            // We want the focus to go back to terminal panel once task modal is dismissed,
+                            // hence we focus that first. Otherwise, we'd end up without a focused element, as
+                            // context menu will be gone the moment we spawn the modal.
+                            .action("Spawn Task", zed_actions::Spawn::modal().boxed_clone())
+                    });
+
+                    Some(menu)
+                }),
+        )
+        .when(assistant_enabled, |this| {
+            this.when_some(split_context.clone(), |this, focus_handle| {
+                this.child(InlineAssistTabBarButton { focus_handle })
+            })
+        })
+        .child(
+            PopoverMenu::new("terminal-pane-tab-bar-split")
+                .trigger_with_tooltip(
+                    IconButton::new("terminal-pane-split", IconName::Split)
+                        .icon_size(IconSize::Small),
+                    Tooltip::text("Split Pane"),
+                )
+                .anchor(Anchor::TopRight)
+                .with_handle(pane.split_item_context_menu_handle.clone())
+                .menu({
+                    move |window, cx| {
+                        ContextMenu::build(window, cx, |menu, _, _| {
+                            menu.when_some(split_context.clone(), |menu, split_context| {
+                                menu.context(split_context)
+                            })
+                            .action("Split Right", SplitRight::default().boxed_clone())
+                            .action("Split Left", SplitLeft::default().boxed_clone())
+                            .action("Split Up", SplitUp::default().boxed_clone())
+                            .action("Split Down", SplitDown::default().boxed_clone())
+                        })
+                        .into()
+                    }
+                }),
+        )
+        .child(
+            IconButton::new("toggle_zoom", IconName::Maximize)
+                .icon_size(IconSize::Small)
+                .toggle_state(zoomed)
+                .selected_icon(IconName::Minimize)
+                .on_click(move |_, window, cx| {
+                    pane_handle.update(cx, |pane, cx| {
+                        pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
+                    });
+                })
+                .tooltip(move |_window, cx| {
+                    Tooltip::for_action(
+                        if zoomed { "Zoom Out" } else { "Zoom In" },
+                        &ToggleZoom,
+                        cx,
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
 #[derive(IntoElement)]
 struct InlineAssistTabBarButton {
     focus_handle: FocusHandle,
@@ -1878,7 +2242,10 @@ mod tests {
 
     use super::*;
     use crate::persistence::{SerializedPane, SerializedPaneGroup};
-    use gpui::{Modifiers, TestAppContext, UpdateGlobal as _, VisualTestContext};
+    use gpui::{
+        EntityId, Modifiers, MouseDownEvent, Point, TestAppContext, UpdateGlobal as _,
+        VisualTestContext, point,
+    };
     use pretty_assertions::assert_eq;
     use project::FakeFs;
     use settings::SettingsStore;
@@ -2339,6 +2706,7 @@ mod tests {
                     SerializedTerminalPanel {
                         items: SerializedItems::NoSplits(vec![12345]),
                         active_item_id: Some(12345),
+                        terminal_list_width: None,
                     },
                     terminal_panel.downgrade(),
                     window,
@@ -2416,6 +2784,7 @@ mod tests {
                             },
                         )),
                         active_item_id: None,
+                        terminal_list_width: None,
                     },
                     terminal_panel.downgrade(),
                     window,
@@ -2939,6 +3308,354 @@ mod tests {
                 });
             })
             .expect("Failed to read configured terminal panel starts_open");
+    }
+
+    #[gpui::test]
+    async fn test_vertical_terminal_list_activates_clicked_terminal(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        for _ in 0..2 {
+            terminal_panel
+                .update_in(cx, |terminal_panel, window, cx| {
+                    terminal_panel.add_terminal_shell(
+                        false,
+                        None,
+                        RevealStrategy::Always,
+                        window,
+                        cx,
+                    )
+                })
+                .await
+                .expect("Failed to spawn a panel terminal");
+        }
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("terminal-list-item-0").is_none(),
+            "the vertical terminal list should not be rendered with the default tab bar"
+        );
+
+        let first_terminal_id = terminal_panel.read_with(cx, |terminal_panel, cx| {
+            let pane = terminal_panel.active_pane.read(cx);
+            assert_eq!(pane.items_len(), 2);
+            assert_eq!(
+                pane.active_item_index(),
+                1,
+                "the most recently added terminal should be active"
+            );
+            pane.item_for_index(0)
+                .expect("the first terminal should exist")
+                .item_id()
+        });
+
+        cx.update(|window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.terminal.get_or_insert_default().tabs =
+                        Some(TerminalTabsLocation::Right);
+                });
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        let first_row_bounds = cx
+            .debug_bounds("terminal-list-item-0")
+            .expect("the vertical terminal list should be rendered");
+        cx.simulate_click(first_row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        terminal_panel.read_with(cx, |terminal_panel, cx| {
+            let active_item = terminal_panel
+                .active_pane
+                .read(cx)
+                .active_item()
+                .expect("the panel should have an active terminal");
+            assert_eq!(
+                active_item.item_id(),
+                first_terminal_id,
+                "clicking a row in the vertical terminal list should activate its terminal"
+            );
+        });
+    }
+
+    async fn init_vertical_terminal_list(
+        terminal_count: usize,
+        cx: &mut TestAppContext,
+    ) -> (VisualTestContext, Entity<TerminalPanel>) {
+        cx.executor().allow_parking();
+        init_test(cx);
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.terminal.get_or_insert_default().tabs = Some(TerminalTabsLocation::Right);
+            });
+        });
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        for _ in 0..terminal_count {
+            terminal_panel
+                .update_in(&mut cx, |terminal_panel, window, cx| {
+                    terminal_panel.add_terminal_shell(
+                        false,
+                        None,
+                        RevealStrategy::Always,
+                        window,
+                        cx,
+                    )
+                })
+                .await
+                .expect("Failed to spawn a panel terminal");
+        }
+        cx.run_until_parked();
+        (cx, terminal_panel)
+    }
+
+    fn simulate_drag(cx: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>) {
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        let midpoint = point((from.x + to.x) / 2., (from.y + to.y) / 2.);
+        cx.simulate_mouse_move(midpoint, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn terminal_ids(
+        terminal_panel: &Entity<TerminalPanel>,
+        cx: &VisualTestContext,
+    ) -> Vec<EntityId> {
+        terminal_panel.read_with(cx, |terminal_panel, cx| {
+            terminal_panel
+                .active_pane
+                .read(cx)
+                .items()
+                .map(|item| item.item_id())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn test_vertical_terminal_list_drag_to_reorder(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel) = init_vertical_terminal_list(3, cx).await;
+        let cx = &mut cx;
+
+        let ids_before = terminal_ids(&terminal_panel, cx);
+        assert_eq!(ids_before.len(), 3);
+
+        let last_row = cx
+            .debug_bounds("terminal-list-item-2")
+            .expect("the third terminal should have a row");
+        let first_row = cx
+            .debug_bounds("terminal-list-item-0")
+            .expect("the first terminal should have a row");
+        simulate_drag(cx, last_row.center(), first_row.center());
+
+        assert_eq!(
+            terminal_ids(&terminal_panel, cx),
+            vec![ids_before[2], ids_before[0], ids_before[1]],
+            "dragging the last row onto the first should move that terminal to the top"
+        );
+    }
+
+    fn terminal_view_at(
+        terminal_panel: &Entity<TerminalPanel>,
+        index: usize,
+        cx: &VisualTestContext,
+    ) -> Entity<TerminalView> {
+        terminal_panel.read_with(cx, |terminal_panel, cx| {
+            terminal_panel
+                .active_pane
+                .read(cx)
+                .item_for_index(index)
+                .and_then(|item| item.downcast::<TerminalView>())
+                .expect("the terminal should exist")
+        })
+    }
+
+    #[gpui::test]
+    async fn test_vertical_terminal_list_double_click_renames(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel) = init_vertical_terminal_list(2, cx).await;
+        let cx = &mut cx;
+        let first_terminal = terminal_view_at(&terminal_panel, 0, cx);
+        // A short title is what made the rename editor too narrow, since the editor is laid
+        // over the title.
+        first_terminal.update(cx, |terminal_view, cx| {
+            terminal_view.set_custom_title(Some("ab".to_string()), cx);
+        });
+        cx.run_until_parked();
+
+        let first_row = cx
+            .debug_bounds("terminal-list-item-0")
+            .expect("the first terminal should have a row")
+            .center();
+        cx.simulate_click(first_row, Modifiers::none());
+        cx.simulate_event(MouseDownEvent {
+            position: first_row,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: first_row,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 2,
+        });
+        cx.run_until_parked();
+
+        assert!(
+            first_terminal.read_with(cx, |terminal_view, _| terminal_view.is_renaming()),
+            "double-clicking a row should start renaming its terminal"
+        );
+
+        let row_bounds = cx
+            .debug_bounds("terminal-list-item-0")
+            .expect("the first terminal should have a row");
+        let editor_bounds = cx
+            .debug_bounds("terminal-rename-editor")
+            .expect("the rename editor should be rendered in the row");
+        assert!(
+            editor_bounds.size.width > row_bounds.size.width / 2.,
+            "the rename editor should stretch across the row, but it is {:?} wide in a {:?} row",
+            editor_bounds.size.width,
+            row_bounds.size.width,
+        );
+    }
+
+    #[gpui::test]
+    async fn test_vertical_terminal_list_context_menu_renames(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel) = init_vertical_terminal_list(2, cx).await;
+        let cx = &mut cx;
+        let first_terminal = terminal_view_at(&terminal_panel, 0, cx);
+
+        let first_row = cx
+            .debug_bounds("terminal-list-item-0")
+            .expect("the first terminal should have a row")
+            .center();
+        cx.simulate_mouse_down(first_row, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(first_row, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+
+        let rename_entry = cx
+            .debug_bounds("MENU_ITEM-Rename")
+            .expect("right-clicking a row should open a menu with a Rename entry")
+            .center();
+        cx.simulate_click(rename_entry, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            first_terminal.read_with(cx, |terminal_view, _| terminal_view.is_renaming()),
+            "choosing Rename from a row's context menu should start renaming its terminal"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_vertical_terminal_list_resize(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel) = init_vertical_terminal_list(2, cx).await;
+        let cx = &mut cx;
+        let list_width = |cx: &VisualTestContext| {
+            terminal_panel.read_with(cx, |panel, _| panel.terminal_list_width)
+        };
+        assert_eq!(list_width(cx), DEFAULT_TERMINAL_LIST_WIDTH);
+
+        let handle = cx
+            .debug_bounds("terminal-list-resize-handle")
+            .expect("the terminal list should have a resize handle")
+            .center();
+        simulate_drag(cx, handle, point(handle.x - px(50.), handle.y));
+        assert_eq!(
+            list_width(cx),
+            DEFAULT_TERMINAL_LIST_WIDTH + px(50.),
+            "dragging the handle of a right-side list to the left should widen it"
+        );
+
+        let handle = cx
+            .debug_bounds("terminal-list-resize-handle")
+            .expect("the terminal list should have a resize handle")
+            .center();
+        simulate_drag(cx, handle, point(handle.x + px(1000.), handle.y));
+        assert_eq!(
+            list_width(cx),
+            MIN_TERMINAL_LIST_WIDTH,
+            "the terminal list should not shrink below its minimum width"
+        );
+
+        let handle = cx
+            .debug_bounds("terminal-list-resize-handle")
+            .expect("the terminal list should have a resize handle")
+            .center();
+        cx.simulate_event(MouseDownEvent {
+            position: handle,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: handle,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 2,
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            list_width(cx),
+            DEFAULT_TERMINAL_LIST_WIDTH,
+            "double-clicking the handle should reset the terminal list width"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_vertical_terminal_list_hidden_with_single_terminal(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.terminal.get_or_insert_default().tabs = Some(TerminalTabsLocation::Left);
+            });
+        });
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        let add_terminal = |cx: &mut VisualTestContext| {
+            terminal_panel.update_in(cx, |terminal_panel, window, cx| {
+                terminal_panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+            })
+        };
+
+        add_terminal(cx)
+            .await
+            .expect("Failed to spawn a panel terminal");
+        cx.run_until_parked();
+
+        assert!(
+            !terminal_panel.read_with(cx, |terminal_panel, _| terminal_panel.terminal_list_visible),
+            "with a single terminal the panel should fall back to the tab bar"
+        );
+        assert!(
+            cx.debug_bounds("terminal-list-item-0").is_none(),
+            "the vertical terminal list should be hidden with a single terminal"
+        );
+
+        add_terminal(cx)
+            .await
+            .expect("Failed to spawn a panel terminal");
+        cx.run_until_parked();
+
+        assert!(
+            terminal_panel.read_with(cx, |terminal_panel, _| terminal_panel.terminal_list_visible),
+            "with two terminals the panel should show the vertical list instead of the tab bar"
+        );
+        assert!(
+            cx.debug_bounds("terminal-list-item-1").is_some(),
+            "the vertical terminal list should show a row for each terminal"
+        );
     }
 
     #[gpui::test]

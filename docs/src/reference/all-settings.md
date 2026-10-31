@@ -4763,6 +4763,44 @@ List of `integer` column numbers
 
 `"bottom"`, `"left"` or `"right"`
 
+### Terminal: Tabs
+
+- Description: Where to show the list of open terminals in the terminal panel. The vertical list is only shown when more than one terminal is open; otherwise the tab bar is shown.
+- Setting: `tabs`
+- Default: `top`
+
+**Options**
+
+1. A horizontal tab bar above each pane:
+
+```json [settings]
+{
+  "terminal": {
+    "tabs": "top"
+  }
+}
+```
+
+2. A vertical list on the left side of the panel:
+
+```json [settings]
+{
+  "terminal": {
+    "tabs": "left"
+  }
+}
+```
+
+3. A vertical list on the right side of the panel:
+
+```json [settings]
+{
+  "terminal": {
+    "tabs": "right"
+  }
+}
+```
+
 ### Terminal: Starts Open
 
 - Description: Whether the terminal panel should open on startup.

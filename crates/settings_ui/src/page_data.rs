@@ -6209,7 +6209,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn terminal_panel_section() -> [SettingsPageItem; 5] {
+    fn terminal_panel_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Terminal Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -6277,6 +6277,20 @@ fn panels_page() -> SettingsPage {
                             .terminal
                             .get_or_insert_default()
                             .show_count_badge = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Terminal Tabs",
+                description: "Where to show the list of open terminals in the terminal panel.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("terminal.tabs"),
+                    pick: |settings_content| settings_content.terminal.as_ref()?.tabs.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.terminal.get_or_insert_default().tabs = value;
                     },
                 }),
                 metadata: None,
