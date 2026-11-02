@@ -506,6 +506,23 @@ pub(crate) enum RemoteOperationKind {
     Push,
 }
 
+/// What to do with the branch once a commit started from the panel succeeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterCommit {
+    Nothing,
+    Push,
+    Sync,
+}
+
+/// The single wide button under the VS Code-style commit box, which turns into
+/// a sync or publish button once there is nothing left to commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VscodePrimaryAction {
+    Commit,
+    Sync { ahead: u32, behind: u32 },
+    Publish,
+}
+
 pub fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
         workspace.toggle_panel_focus::<GitPanel>(window, cx);
@@ -1294,6 +1311,7 @@ impl From<&Arc<InitialGraphCommitData>> for CommitHistoryEntry {
 }
 
 const MAX_PANEL_EDITOR_LINES: usize = 6;
+const VSCODE_COMMIT_EDITOR_MAX_LINES: usize = 10;
 
 pub(crate) fn commit_message_editor(
     commit_message_buffer: Entity<Buffer>,
@@ -1461,6 +1479,9 @@ impl GitPanel {
                     this.bulk_staging.take();
                     update_entries = true;
                 }
+                if layout != was_layout {
+                    this.sync_commit_editor_layout(window, cx);
+                }
                 if (diff_stats != was_diff_stats) || update_entries {
                     this.update_visible_entries(window, cx);
                 }
@@ -1616,6 +1637,7 @@ impl GitPanel {
                 remote_action_menu_handle: PopoverMenuHandle::default(),
             };
 
+            this.sync_commit_editor_layout(window, cx);
             this.schedule_update(window, cx);
             this
         })
@@ -4089,6 +4111,16 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.commit_changes_then(options, AfterCommit::Nothing, window, cx);
+    }
+
+    fn commit_changes_then(
+        &mut self,
+        options: CommitOptions,
+        after_commit: AfterCommit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
@@ -4167,6 +4199,11 @@ impl GitPanel {
                                 .update(cx, |editor, cx| editor.clear(window, cx));
                             this.original_commit_message = None;
                             this.serialize(cx);
+                        }
+                        match after_commit {
+                            AfterCommit::Nothing => {}
+                            AfterCommit::Push => this.push(false, false, window, cx),
+                            AfterCommit::Sync => this.sync(window, cx),
                         }
                     }
                     Err(e) => this.show_error_toast("commit", e, cx),
@@ -4919,6 +4956,21 @@ impl GitPanel {
     }
 
     pub(crate) fn pull(&mut self, rebase: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull_then(rebase, false, window, cx);
+    }
+
+    /// Pulls and then pushes, like VS Code's "Sync Changes".
+    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull_then(false, true, window, cx);
+    }
+
+    fn pull_then(
+        &mut self,
+        rebase: bool,
+        push_after_pull: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.can_push_and_pull(cx) {
             return;
         }
@@ -4935,7 +4987,7 @@ impl GitPanel {
         telemetry::event!("Git Pulled");
         let remote = self.get_remote(false, false, window, cx);
         cx.spawn_in(window, async move |this, cx| {
-            let _clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
+            let clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
                 this.clear_remote_operation(cx);
             });
 
@@ -4966,10 +5018,18 @@ impl GitPanel {
             });
 
             let remote_message = pull.await?;
+            // The pull has to stop counting as in progress before a follow-up
+            // push can start, since only one remote operation runs at a time.
+            drop(clear_pending_remote_operation);
 
             let action = RemoteAction::Pull(remote);
-            this.update(cx, |this, cx| match remote_message {
-                Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+            this.update_in(cx, |this, window, cx| match remote_message {
+                Ok(remote_message) => {
+                    this.show_remote_output(action, remote_message, cx);
+                    if push_after_pull {
+                        this.push(false, false, window, cx);
+                    }
+                }
                 Err(e) => {
                     log::error!("Error while pulling {:?}", e);
                     this.show_error_toast(action.name(), e, cx)
@@ -5678,6 +5738,7 @@ impl GitPanel {
                                 cx,
                             )
                         });
+                        git_panel.sync_commit_editor_layout(window, cx);
                     }
 
                     // Create subscription such that, any edit on the commit
@@ -6153,9 +6214,7 @@ impl GitPanel {
         self.select_first_entry_if_none(window, cx);
         self.select_last_entry_if_out_of_bounds(window, cx);
 
-        let suggested_commit_message = self.suggest_commit_message(cx);
-        let placeholder_text = suggested_commit_message.unwrap_or("Enter commit message".into());
-
+        let placeholder_text = self.commit_placeholder_text(window, cx);
         self.commit_editor.update(cx, |editor, cx| {
             editor.set_placeholder_text(&placeholder_text, window, cx)
         });
@@ -6826,6 +6885,10 @@ impl GitPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The VS Code commit box grows with its content instead.
+        if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            return;
+        }
         self.commit_editor_expanded = !self.commit_editor_expanded;
         self.commit_editor.update(cx, |editor, _cx| {
             if self.commit_editor_expanded {
@@ -7333,6 +7396,393 @@ impl GitPanel {
                 )
                 .into_any_element(),
             ))
+    }
+
+    fn sync_commit_editor_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            EditorMode::AutoHeight {
+                min_lines: 1,
+                max_lines: Some(VSCODE_COMMIT_EDITOR_MAX_LINES),
+            }
+        } else if self.commit_editor_expanded {
+            EditorMode::Full {
+                scale_ui_elements_with_buffer_font_size: false,
+                show_active_line_background: false,
+                sizing_behavior: SizingBehavior::ExcludeOverscrollMargin,
+            }
+        } else {
+            EditorMode::AutoHeight {
+                min_lines: MAX_PANEL_EDITOR_LINES,
+                max_lines: Some(MAX_PANEL_EDITOR_LINES),
+            }
+        };
+        let placeholder_text = self.commit_placeholder_text(window, cx);
+        self.commit_editor.update(cx, |editor, cx| {
+            editor.set_mode(mode);
+            editor.set_placeholder_text(&placeholder_text, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn commit_placeholder_text(&self, window: &Window, cx: &App) -> String {
+        let suggested_commit_message = self.suggest_commit_message(cx);
+        if !GitPanelSettings::get_global(cx).is_vscode_layout() {
+            return suggested_commit_message.unwrap_or_else(|| "Enter commit message".into());
+        }
+        // Committing with an empty message uses the suggestion, so it stays
+        // visible rather than being hidden behind VS Code's generic prompt.
+        if let Some(suggested_commit_message) = suggested_commit_message {
+            return suggested_commit_message;
+        }
+        let keystroke = window
+            .highest_precedence_binding_for_action_in(
+                &git::Commit,
+                &self.commit_editor.focus_handle(cx),
+            )
+            .map(|binding| ui::text_for_keybinding_keystrokes(binding.keystrokes(), cx))
+            .unwrap_or_else(|| {
+                if cfg!(target_os = "macos") {
+                    "Cmd+Enter".into()
+                } else {
+                    "Ctrl+Enter".into()
+                }
+            });
+        let branch_name = self
+            .active_repository
+            .as_ref()
+            .and_then(|repository| repository.read(cx).branch.as_ref())
+            .map(|branch| branch.name().to_owned());
+        match branch_name {
+            Some(branch_name) => format!("Message ({keystroke} to commit on \"{branch_name}\")"),
+            None => format!("Message ({keystroke} to commit)"),
+        }
+    }
+
+    fn vscode_primary_action(&self, cx: &App) -> VscodePrimaryAction {
+        let has_work_to_commit = self.entry_count > 0 || self.amend_pending;
+        let branch = self
+            .active_repository
+            .as_ref()
+            .and_then(|repository| repository.read(cx).branch.as_ref());
+        Self::vscode_primary_action_for(has_work_to_commit, self.can_push_and_pull(cx), branch)
+    }
+
+    fn vscode_primary_action_for(
+        has_work_to_commit: bool,
+        can_push_and_pull: bool,
+        branch: Option<&Branch>,
+    ) -> VscodePrimaryAction {
+        if has_work_to_commit || !can_push_and_pull {
+            return VscodePrimaryAction::Commit;
+        }
+        // Detached HEAD has nothing to sync or publish.
+        let Some(branch) = branch else {
+            return VscodePrimaryAction::Commit;
+        };
+        match branch.upstream {
+            Some(Upstream {
+                tracking: UpstreamTracking::Tracked(UpstreamTrackingStatus { ahead, behind }),
+                ..
+            }) => {
+                if ahead > 0 || behind > 0 {
+                    VscodePrimaryAction::Sync { ahead, behind }
+                } else {
+                    VscodePrimaryAction::Commit
+                }
+            }
+            Some(Upstream {
+                tracking: UpstreamTracking::Gone,
+                ..
+            })
+            | None => VscodePrimaryAction::Publish,
+        }
+    }
+
+    fn render_vscode_scm_input(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.active_repository.as_ref()?;
+        if matches!(self.git_access, Some(GitAccess::No)) {
+            return None;
+        }
+
+        let theme_settings = ThemeSettings::get_global(cx);
+        let editor_style =
+            git_commit_editor_style(theme_settings.git_commit_buffer_font_size(cx), cx);
+        let editor_focused = self.commit_editor.focus_handle(cx).is_focused(window);
+        let max_title_length = GitPanelSettings::get_global(cx).commit_title_max_length;
+        let title_exceeds_limit = max_title_length > 0
+            && self
+                .commit_editor
+                .read(cx)
+                .text(cx)
+                .lines()
+                .next()
+                .is_some_and(|title| commit_title_exceeds_limit(title, max_title_length));
+        let colors = cx.theme().colors();
+        let border_color = if title_exceeds_limit {
+            cx.theme().status().warning_border
+        } else if editor_focused {
+            colors.border_focused
+        } else {
+            colors.border
+        };
+
+        Some(
+            v_flex()
+                .w_full()
+                .flex_none()
+                .px_2()
+                .pt_1()
+                .pb_2()
+                .gap_1p5()
+                .child(
+                    h_flex()
+                        .id("vscode-commit-input")
+                        .w_full()
+                        .items_start()
+                        .gap_0p5()
+                        .py_1()
+                        .pl_1p5()
+                        .pr_0p5()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(border_color)
+                        .bg(colors.editor_background)
+                        .cursor_text()
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            window.focus(&this.commit_editor.focus_handle(cx), cx);
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .on_action(|&zed_actions::editor::MoveUp, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_action(|&zed_actions::editor::MoveDown, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(EditorElement::new(&self.commit_editor, editor_style)),
+                        )
+                        .children(self.render_co_authors(cx))
+                        .children(self.render_generate_commit_message_button(cx)),
+                )
+                .when(title_exceeds_limit, |this| {
+                    this.child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::Warning)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Warning),
+                            )
+                            .child(
+                                Label::new(format!(
+                                    "Commit message title exceeds {max_title_length}-character limit."
+                                ))
+                                .size(LabelSize::Small)
+                                .color(Color::Warning),
+                            ),
+                    )
+                })
+                .child(self.render_vscode_primary_button(cx))
+                .when(self.amend_pending, |this| {
+                    this.child(
+                        h_flex()
+                            .gap_1()
+                            .justify_between()
+                            .child(
+                                Label::new("Amending the last commit")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            )
+                            .child(
+                                Button::new("vscode-cancel-amend", "Cancel")
+                                    .label_size(LabelSize::Small)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_amend_pending(false, cx)
+                                    })),
+                            ),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_vscode_primary_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let action = self.vscode_primary_action(cx);
+        let remote_busy = self.pending_remote_operation.is_some();
+        let (can_commit, commit_tooltip) = self.configure_commit_button(cx);
+        let editor_focus_handle = self.commit_editor.focus_handle(cx);
+
+        let (icon, label, enabled, tooltip): (IconName, SharedString, bool, SharedString) =
+            match action {
+                VscodePrimaryAction::Commit => (
+                    IconName::Check,
+                    self.commit_button_title().into(),
+                    can_commit && !self.modal_open,
+                    commit_tooltip.into(),
+                ),
+                VscodePrimaryAction::Sync { ahead, behind } => {
+                    let mut label = String::from("Sync Changes");
+                    if behind > 0 {
+                        label.push_str(&format!(" {behind}↓"));
+                    }
+                    if ahead > 0 {
+                        label.push_str(&format!(" {ahead}↑"));
+                    }
+                    (
+                        IconName::ArrowCircle,
+                        label.into(),
+                        !remote_busy,
+                        "Pull and push commits".into(),
+                    )
+                }
+                VscodePrimaryAction::Publish => (
+                    IconName::ArrowUp,
+                    "Publish Branch".into(),
+                    !remote_busy,
+                    "Publish this branch to a remote".into(),
+                ),
+            };
+
+        let primary = ButtonLike::new("vscode-primary-action")
+            .style(ButtonStyle::Tinted(TintColor::Accent))
+            .size(ButtonSize::Medium)
+            .full_width()
+            .disabled(!enabled)
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .gap_1()
+                    .child(Icon::new(icon).size(IconSize::Small))
+                    .child(Label::new(label).size(LabelSize::Small)),
+            )
+            .tooltip(move |_window, cx| {
+                if action == VscodePrimaryAction::Commit && enabled {
+                    Tooltip::for_action_in(tooltip.clone(), &git::Commit, &editor_focus_handle, cx)
+                } else {
+                    Tooltip::simple(tooltip.clone(), cx)
+                }
+            })
+            .on_click(cx.listener(move |this, _, window, cx| match action {
+                VscodePrimaryAction::Commit => {
+                    telemetry::event!("Git Committed", source = "Git Panel");
+                    let options = this.commit_options();
+                    this.commit_changes(options, window, cx);
+                }
+                VscodePrimaryAction::Sync { .. } => this.sync(window, cx),
+                VscodePrimaryAction::Publish => this.push(false, false, window, cx),
+            }));
+
+        h_flex()
+            .w_full()
+            .gap_px()
+            .child(div().flex_1().min_w_0().child(primary))
+            .when(action == VscodePrimaryAction::Commit, |this| {
+                this.child(self.render_vscode_commit_menu(can_commit, cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_vscode_commit_menu(&self, can_commit: bool, cx: &mut Context<Self>) -> AnyElement {
+        let git_panel = cx.weak_entity();
+        let editor_focus_handle = self.commit_editor.focus_handle(cx);
+        let can_push = self.can_push_and_pull(cx);
+        let has_previous_commit = self.head_commit(cx).is_some();
+        let amend = self.amend_pending();
+        let signoff = self.signoff_enabled;
+        let skip_hooks = self.skip_hooks_enabled;
+        let commit_disabled = !can_commit || self.modal_open;
+
+        PopoverMenu::new("vscode-commit-menu")
+            .trigger(
+                IconButton::new("vscode-commit-menu-trigger", IconName::ChevronDown)
+                    .style(ButtonStyle::Tinted(TintColor::Accent))
+                    .size(ButtonSize::Medium)
+                    .icon_size(IconSize::Small)
+                    .disabled(self.generate_commit_message_task.is_some()),
+            )
+            .with_handle(self.commit_menu_handle.clone())
+            .menu(move |window, cx| {
+                let commit_entry = |label: &'static str, after_commit: AfterCommit| {
+                    let git_panel = git_panel.clone();
+                    ContextMenuEntry::new(label)
+                        .disabled(
+                            commit_disabled || (after_commit != AfterCommit::Nothing && !can_push),
+                        )
+                        .handler(move |window, cx| {
+                            git_panel
+                                .update(cx, |git_panel, cx| {
+                                    let options = git_panel.commit_options();
+                                    git_panel.commit_changes_then(
+                                        options,
+                                        after_commit,
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        })
+                };
+                let git_panel = git_panel.clone();
+                let editor_focus_handle = editor_focus_handle.clone();
+                Some(ContextMenu::build(window, cx, move |context_menu, _, _| {
+                    context_menu
+                        .context(editor_focus_handle)
+                        .item(
+                            commit_entry("Commit", AfterCommit::Nothing)
+                                .action(Box::new(git::Commit)),
+                        )
+                        .item(commit_entry("Commit & Push", AfterCommit::Push))
+                        .item(commit_entry("Commit & Sync", AfterCommit::Sync))
+                        .separator()
+                        .when(has_previous_commit, |this| {
+                            this.toggleable_entry(
+                                "Amend",
+                                amend,
+                                IconPosition::Start,
+                                Some(Box::new(Amend)),
+                                {
+                                    let git_panel = git_panel.clone();
+                                    move |_, cx| {
+                                        git_panel
+                                            .update(cx, |git_panel, cx| {
+                                                git_panel.toggle_amend_pending(cx);
+                                            })
+                                            .ok();
+                                    }
+                                },
+                            )
+                        })
+                        .toggleable_entry(
+                            "Signoff",
+                            signoff,
+                            IconPosition::Start,
+                            Some(Box::new(Signoff)),
+                            move |window, cx| window.dispatch_action(Box::new(Signoff), cx),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Skip Hooks")
+                                .toggleable(IconPosition::Start, skip_hooks)
+                                .action(Box::new(SkipHooks))
+                                .handler(move |window, cx| {
+                                    window.dispatch_action(Box::new(SkipHooks), cx)
+                                }),
+                        )
+                }))
+            })
+            .anchor(Anchor::TopRight)
+            .offset(gpui::Point {
+                x: px(0.),
+                y: px(2.),
+            })
+            .into_any_element()
     }
 
     fn render_pending_amend(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -10201,6 +10651,8 @@ impl Render for GitPanel {
         let project = self.project.read(cx);
         let has_entries = !self.entries.is_empty();
         let has_write_access = self.has_write_access(cx);
+        let vscode_layout = GitPanelSettings::get_global(cx).is_vscode_layout();
+        let commit_editor_fills_panel = self.commit_editor_expanded && !vscode_layout;
 
         #[cfg(feature = "call")]
         let has_co_authors = self
@@ -10291,13 +10743,16 @@ impl Render for GitPanel {
             .child(
                 v_flex()
                     .size_full()
-                    .when(!self.commit_editor_expanded, |this| {
+                    .when(!commit_editor_fills_panel, |this| {
                         this.child(self.render_tab_bar(cx))
                     })
                     .map(|this| match self.active_tab {
                         GitPanelTab::Changes => this
                             .children(self.render_changes_header(window, cx))
-                            .when(!self.commit_editor_expanded, |this| {
+                            .when(vscode_layout, |this| {
+                                this.children(self.render_vscode_scm_input(window, cx))
+                            })
+                            .when(!commit_editor_fills_panel, |this| {
                                 this.map(|this| {
                                     if let Some(repo) = self.active_repository.clone()
                                         && has_entries
@@ -10313,12 +10768,14 @@ impl Render for GitPanel {
                                     }
                                 })
                             })
-                            .children(self.render_footer(window, cx))
-                            .when(self.amend_pending, |this| {
-                                this.child(self.render_pending_amend(cx))
-                            })
-                            .when(!self.amend_pending, |this| {
-                                this.children(self.render_previous_commit(window, cx))
+                            .when(!vscode_layout, |this| {
+                                this.children(self.render_footer(window, cx))
+                                    .when(self.amend_pending, |this| {
+                                        this.child(self.render_pending_amend(cx))
+                                    })
+                                    .when(!self.amend_pending, |this| {
+                                        this.children(self.render_previous_commit(window, cx))
+                                    })
                             }),
                         GitPanelTab::History => this.child(self.render_history_tab(window, cx)),
                     })
@@ -15565,6 +16022,138 @@ mod tests {
                 panel.commit_editor.read(cx).mode().clone(),
                 EditorMode::AutoHeight { .. }
             ));
+        });
+    }
+
+    #[test]
+    fn test_vscode_primary_action_for() {
+        let branch = |tracking: Option<UpstreamTracking>| Branch {
+            is_head: true,
+            ref_name: "refs/heads/main".into(),
+            upstream: tracking.map(|tracking| Upstream {
+                ref_name: "refs/remotes/origin/main".into(),
+                tracking,
+            }),
+            most_recent_commit: None,
+        };
+        let tracked = |ahead, behind| {
+            Some(UpstreamTracking::Tracked(UpstreamTrackingStatus {
+                ahead,
+                behind,
+            }))
+        };
+
+        // Pending work always wins over the branch's remote state.
+        assert_eq!(
+            GitPanel::vscode_primary_action_for(true, true, Some(&branch(tracked(2, 1)))),
+            VscodePrimaryAction::Commit
+        );
+        assert_eq!(
+            GitPanel::vscode_primary_action_for(false, true, Some(&branch(tracked(2, 1)))),
+            VscodePrimaryAction::Sync {
+                ahead: 2,
+                behind: 1
+            }
+        );
+        assert_eq!(
+            GitPanel::vscode_primary_action_for(false, true, Some(&branch(tracked(0, 0)))),
+            VscodePrimaryAction::Commit
+        );
+        assert_eq!(
+            GitPanel::vscode_primary_action_for(false, true, Some(&branch(None))),
+            VscodePrimaryAction::Publish
+        );
+        assert_eq!(
+            GitPanel::vscode_primary_action_for(
+                false,
+                true,
+                Some(&branch(Some(UpstreamTracking::Gone)))
+            ),
+            VscodePrimaryAction::Publish
+        );
+        // Collab guests cannot push or pull, and detached HEAD has no branch.
+        assert_eq!(
+            GitPanel::vscode_primary_action_for(false, false, Some(&branch(None))),
+            VscodePrimaryAction::Commit
+        );
+        assert_eq!(
+            GitPanel::vscode_primary_action_for(false, true, None),
+            VscodePrimaryAction::Commit
+        );
+    }
+
+    #[gpui::test]
+    async fn test_vscode_layout_commit_editor(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({ "project": { ".git": {}, "src": { "main.rs": "fn main() {}" } } }),
+        )
+        .await;
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        cx.executor().run_until_parked();
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Vscode);
+                })
+            });
+        });
+        cx.executor().run_until_parked();
+
+        panel.update_in(cx, |panel, window, cx| {
+            assert_eq!(
+                panel.commit_editor.read(cx).mode().clone(),
+                EditorMode::AutoHeight {
+                    min_lines: 1,
+                    max_lines: Some(VSCODE_COMMIT_EDITOR_MAX_LINES),
+                }
+            );
+            let commit_editor = panel.commit_editor.clone();
+            let placeholder = commit_editor.update(cx, |editor, cx| {
+                editor.placeholder_text(cx).unwrap_or_default()
+            });
+            assert!(
+                placeholder.starts_with("Message ("),
+                "unexpected placeholder {placeholder:?}"
+            );
+
+            // The VS Code commit box never takes over the whole panel.
+            panel.toggle_fill_commit_editor(&ToggleFillCommitEditor, window, cx);
+            assert!(!panel.commit_editor_expanded);
+        });
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Zed);
+                })
+            });
+        });
+        cx.executor().run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel.commit_editor.read(cx).mode().clone(),
+                EditorMode::AutoHeight {
+                    min_lines: MAX_PANEL_EDITOR_LINES,
+                    max_lines: Some(MAX_PANEL_EDITOR_LINES),
+                }
+            );
         });
     }
 
