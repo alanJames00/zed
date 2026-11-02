@@ -160,6 +160,9 @@ pub(crate) fn deserialize_terminal_panel(
                         if let Some(focused_interim_pane) = focused_interim_pane {
                             terminal_panel.active_pane = focused_interim_pane;
                         }
+                        // The restored panes were filled before they joined `center`, so the
+                        // pane events for their terminals counted the old layout.
+                        terminal_panel.update_terminal_list_visibility(cx);
                         restored_items
                     })?
                 } else {
