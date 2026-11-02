@@ -3,8 +3,8 @@ use gpui::Pixels;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{
-    FolderIndicator, GitPanelClickBehavior, GitPanelCommitEditor, GitPanelGroupBy, GitPanelSortBy,
-    IntoGpui, RegisterSetting, Settings, StatusStyle,
+    FolderIndicator, GitPanelClickBehavior, GitPanelCommitEditor, GitPanelGroupBy, GitPanelLayout,
+    GitPanelSortBy, GitPanelUntrackedChanges, IntoGpui, RegisterSetting, Settings, StatusStyle,
 };
 use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
 use workspace::dock::DockPosition;
@@ -34,6 +34,8 @@ pub struct GitPanelSettings {
     pub commit_title_max_length: usize,
     pub entry_primary_click_action: GitPanelClickBehavior,
     pub commit_editor: GitPanelCommitEditor,
+    pub layout: GitPanelLayout,
+    pub untracked_changes: GitPanelUntrackedChanges,
 }
 
 #[derive(Default)]
@@ -53,6 +55,30 @@ impl ScrollbarVisibility for GitPanelScrollbarAccessor {
             .scrollbar
             .show
             .unwrap_or_else(|| EditorSettings::get_global(cx).scrollbar.show)
+    }
+}
+
+impl GitPanelSettings {
+    pub fn is_vscode_layout(&self) -> bool {
+        self.layout == GitPanelLayout::Vscode
+    }
+
+    /// The VS Code layout always groups by staging state, since its
+    /// "Staged Changes" / "Changes" groups are what the inline row actions act on.
+    pub fn effective_group_by(&self) -> GitPanelGroupBy {
+        if self.is_vscode_layout() {
+            GitPanelGroupBy::Staging
+        } else {
+            self.group_by
+        }
+    }
+
+    pub fn effective_untracked_changes(&self) -> GitPanelUntrackedChanges {
+        if self.is_vscode_layout() {
+            self.untracked_changes
+        } else {
+            GitPanelUntrackedChanges::Mixed
+        }
     }
 }
 
@@ -84,6 +110,8 @@ impl Settings for GitPanelSettings {
             commit_title_max_length: git_panel.commit_title_max_length.unwrap(),
             entry_primary_click_action: git_panel.entry_primary_click_action.unwrap(),
             commit_editor: git_panel.commit_editor.unwrap(),
+            layout: git_panel.layout.unwrap(),
+            untracked_changes: git_panel.untracked_changes.unwrap(),
         }
     }
 }

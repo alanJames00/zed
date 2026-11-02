@@ -6208,7 +6208,9 @@ See the [debugger page](../debugger.md) for more information about debugging sup
     "show_count_badge": false,
     "diff_stats": true,
     "commit_title_max_length": 0,
-    "entry_primary_click_action": "project_diff"
+    "entry_primary_click_action": "project_diff",
+    "layout": "zed",
+    "untracked_changes": "mixed"
   }
 }
 ```
@@ -6233,6 +6235,8 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 - `diff_stats`: Whether to show the addition/deletion change count next to each file in the git panel
 - `commit_title_max_length`: Maximum length of the commit message title before a warning is shown. Set to `0` to disable
 - `entry_primary_click_action`: Default action when clicking a changed file in the git panel. Can be `project_diff`, `file_diff`, or `view_file`
+- `layout`: Which layout the git panel uses. Can be `zed` or `vscode`. The `vscode` layout groups files into collapsible "Merge Changes", "Staged Changes" and "Changes" sections with inline stage, unstage, discard and open actions
+- `untracked_changes`: Where untracked files are listed when using the `vscode` layout. Can be `mixed`, `separate`, or `hidden`
 
 ## Git Worktree Directory
 

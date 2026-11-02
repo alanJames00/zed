@@ -6541,7 +6541,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn git_panel_section() -> [SettingsPageItem; 19] {
+    fn git_panel_section() -> [SettingsPageItem; 21] {
         [
             SettingsPageItem::SectionHeader("Git Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -6817,6 +6817,43 @@ fn panels_page() -> SettingsPage {
                             .git_panel
                             .get_or_insert_default()
                             .commit_editor = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Layout",
+                description: "Which layout the Git panel uses.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_panel.layout"),
+                    pick: |settings_content| settings_content.git_panel.as_ref()?.layout.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.git_panel.get_or_insert_default().layout = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Untracked Changes",
+                description: "Where untracked files are listed when using the VS Code layout.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_panel.untracked_changes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .git_panel
+                            .as_ref()?
+                            .untracked_changes
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .git_panel
+                            .get_or_insert_default()
+                            .untracked_changes = value;
                     },
                 }),
                 metadata: None,

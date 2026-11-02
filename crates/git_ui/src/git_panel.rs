@@ -75,8 +75,8 @@ use prompt_store::RULES_FILE_NAMES;
 
 use serde::{Deserialize, Serialize};
 use settings::{
-    GitPanelClickBehavior, GitPanelCommitEditor, GitPanelGroupBy, GitPanelSortBy, Settings,
-    SettingsStore, StatusStyle, update_settings_file,
+    GitPanelClickBehavior, GitPanelCommitEditor, GitPanelGroupBy, GitPanelSortBy,
+    GitPanelUntrackedChanges, Settings, SettingsStore, StatusStyle, update_settings_file,
 };
 use smallvec::SmallVec;
 use std::cell::Cell;
@@ -374,9 +374,10 @@ fn git_panel_view_options_menu(
 ) -> Entity<ContextMenu> {
     let view_options_menu_state = Rc::new(Cell::new(GitPanelViewOptionsMenuState {
         sort_by: GitPanelSettings::get_global(cx).sort_by,
-        group_by: GitPanelSettings::get_global(cx).group_by,
+        group_by: GitPanelSettings::get_global(cx).effective_group_by(),
         tree_view: GitPanelSettings::get_global(cx).tree_view,
     }));
+    let vscode_layout = GitPanelSettings::get_global(cx).is_vscode_layout();
 
     ContextMenu::build_persistent(window, cx, move |context_menu, _, _| {
         let state = view_options_menu_state.get();
@@ -444,51 +445,53 @@ fn git_panel_view_options_menu(
                             })
                     })
             })
-            .separator()
-            .header("Group By")
-            .item({
-                let view_options_menu_state = view_options_menu_state.clone();
-                ContextMenuEntry::new("None")
-                    .toggle(IconPosition::End, state.group_by == GitPanelGroupBy::None)
-                    .handler(move |window, cx| {
-                        if state.group_by != GitPanelGroupBy::None {
-                            view_options_menu_state.set(GitPanelViewOptionsMenuState {
-                                group_by: GitPanelGroupBy::None,
-                                ..state
-                            });
-                            window.dispatch_action(Box::new(SetGroupByNone), cx);
-                        }
+            .when(!vscode_layout, |this| {
+                this.separator()
+                    .header("Group By")
+                    .item({
+                        let view_options_menu_state = view_options_menu_state.clone();
+                        ContextMenuEntry::new("None")
+                            .toggle(IconPosition::End, state.group_by == GitPanelGroupBy::None)
+                            .handler(move |window, cx| {
+                                if state.group_by != GitPanelGroupBy::None {
+                                    view_options_menu_state.set(GitPanelViewOptionsMenuState {
+                                        group_by: GitPanelGroupBy::None,
+                                        ..state
+                                    });
+                                    window.dispatch_action(Box::new(SetGroupByNone), cx);
+                                }
+                            })
                     })
-            })
-            .item({
-                let view_options_menu_state = view_options_menu_state.clone();
-                ContextMenuEntry::new("Tracked & Untracked")
-                    .toggle(IconPosition::End, state.group_by == GitPanelGroupBy::Status)
-                    .handler(move |window, cx| {
-                        if state.group_by != GitPanelGroupBy::Status {
-                            view_options_menu_state.set(GitPanelViewOptionsMenuState {
-                                group_by: GitPanelGroupBy::Status,
-                                ..state
-                            });
-                            window.dispatch_action(Box::new(SetGroupByStatus), cx);
-                        }
+                    .item({
+                        let view_options_menu_state = view_options_menu_state.clone();
+                        ContextMenuEntry::new("Tracked & Untracked")
+                            .toggle(IconPosition::End, state.group_by == GitPanelGroupBy::Status)
+                            .handler(move |window, cx| {
+                                if state.group_by != GitPanelGroupBy::Status {
+                                    view_options_menu_state.set(GitPanelViewOptionsMenuState {
+                                        group_by: GitPanelGroupBy::Status,
+                                        ..state
+                                    });
+                                    window.dispatch_action(Box::new(SetGroupByStatus), cx);
+                                }
+                            })
                     })
-            })
-            .item({
-                let view_options_menu_state = view_options_menu_state.clone();
-                ContextMenuEntry::new("Staged & Unstaged")
-                    .toggle(
-                        IconPosition::End,
-                        state.group_by == GitPanelGroupBy::Staging,
-                    )
-                    .handler(move |window, cx| {
-                        if state.group_by != GitPanelGroupBy::Staging {
-                            view_options_menu_state.set(GitPanelViewOptionsMenuState {
-                                group_by: GitPanelGroupBy::Staging,
-                                ..state
-                            });
-                            window.dispatch_action(Box::new(SetGroupByStaging), cx);
-                        }
+                    .item({
+                        let view_options_menu_state = view_options_menu_state.clone();
+                        ContextMenuEntry::new("Staged & Unstaged")
+                            .toggle(
+                                IconPosition::End,
+                                state.group_by == GitPanelGroupBy::Staging,
+                            )
+                            .handler(move |window, cx| {
+                                if state.group_by != GitPanelGroupBy::Staging {
+                                    view_options_menu_state.set(GitPanelViewOptionsMenuState {
+                                        group_by: GitPanelGroupBy::Staging,
+                                        ..state
+                                    });
+                                    window.dispatch_action(Box::new(SetGroupByStaging), cx);
+                                }
+                            })
                     })
             })
     })
@@ -615,6 +618,9 @@ enum Section {
     New,
     Staged,
     Unstaged,
+    /// Untracked files listed apart from "Changes" when the VS Code layout
+    /// uses `untracked_changes: separate`.
+    Untracked,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -677,7 +683,7 @@ impl StageIntent {
     fn for_section(section: Section) -> Self {
         match section {
             Section::Staged => StageIntent::Unstage,
-            Section::Unstaged => StageIntent::Stage,
+            Section::Unstaged | Section::Untracked => StageIntent::Stage,
             _ => StageIntent::Toggle,
         }
     }
@@ -720,7 +726,12 @@ enum DiffTarget {
 }
 
 impl GitHeaderEntry {
-    pub fn contains(&self, status_entry: &GitStatusEntry, repo: &Repository) -> bool {
+    pub fn contains(
+        &self,
+        status_entry: &GitStatusEntry,
+        repo: &Repository,
+        untracked_listed_separately: bool,
+    ) -> bool {
         let this = &self.header;
         let status = status_entry.status;
         match this {
@@ -737,19 +748,38 @@ impl GitHeaderEntry {
                 !repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path)
                     && GitPanel::stage_status_for_entry(status_entry, repo).has_staged()
             }
+            // With untracked files in their own group, "Stage All Changes" on
+            // the "Changes" group must leave them alone, as in VS Code.
             Section::Unstaged => {
                 !repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path)
+                    && !(untracked_listed_separately && status.is_untracked())
                     && GitPanel::stage_status_for_entry(status_entry, repo).has_unstaged()
+            }
+            Section::Untracked => {
+                !repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path)
+                    && status.is_untracked()
             }
         }
     }
-    pub fn title(&self) -> &'static str {
+
+    pub fn title(&self, vscode_layout: bool) -> &'static str {
+        if vscode_layout {
+            return match self.header {
+                Section::Conflict => "Merge Changes",
+                Section::Tracked => "Tracked",
+                Section::New => "Untracked",
+                Section::Staged => "Staged Changes",
+                Section::Unstaged => "Changes",
+                Section::Untracked => "Untracked Changes",
+            };
+        }
         match self.header {
             Section::Conflict => "Conflicts",
             Section::Tracked => "Tracked",
             Section::New => "Untracked",
             Section::Staged => "Staged",
             Section::Unstaged => "Unstaged",
+            Section::Untracked => "Untracked",
         }
     }
 }
@@ -1377,7 +1407,10 @@ impl GitPanel {
             cx.on_focus(&focus_handle, window, Self::focus_in).detach();
 
             let mut was_sort_by = GitPanelSettings::get_global(cx).sort_by;
-            let mut was_group_by = GitPanelSettings::get_global(cx).group_by;
+            let mut was_group_by = GitPanelSettings::get_global(cx).effective_group_by();
+            let mut was_untracked_changes =
+                GitPanelSettings::get_global(cx).effective_untracked_changes();
+            let mut was_layout = GitPanelSettings::get_global(cx).layout;
             let mut was_tree_view = GitPanelSettings::get_global(cx).tree_view;
             let mut was_file_icons = GitPanelSettings::get_global(cx).file_icons;
             let mut was_folder_indicator = GitPanelSettings::get_global(cx).folder_indicator;
@@ -1386,7 +1419,9 @@ impl GitPanel {
             cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
                 let settings = GitPanelSettings::get_global(cx);
                 let sort_by = settings.sort_by;
-                let group_by = settings.group_by;
+                let group_by = settings.effective_group_by();
+                let untracked_changes = settings.effective_untracked_changes();
+                let layout = settings.layout;
                 let tree_view = settings.tree_view;
                 let file_icons = settings.file_icons;
                 let folder_indicator = settings.folder_indicator;
@@ -1417,7 +1452,11 @@ impl GitPanel {
                 }
 
                 let mut update_entries = false;
-                if sort_by != was_sort_by || group_by != was_group_by || tree_view != was_tree_view
+                if sort_by != was_sort_by
+                    || group_by != was_group_by
+                    || untracked_changes != was_untracked_changes
+                    || layout != was_layout
+                    || tree_view != was_tree_view
                 {
                     this.bulk_staging.take();
                     update_entries = true;
@@ -1430,6 +1469,8 @@ impl GitPanel {
                 }
                 was_sort_by = sort_by;
                 was_group_by = group_by;
+                was_untracked_changes = untracked_changes;
+                was_layout = layout;
                 was_tree_view = tree_view;
                 was_file_icons = file_icons;
                 was_folder_indicator = folder_indicator;
@@ -1936,9 +1977,15 @@ impl GitPanel {
                 .status_for_path(&repo_path)
                 .map(|status| status.status)
                 .map(|status| {
-                    if GitPanelSettings::get_global(cx).group_by == GitPanelGroupBy::Staging {
+                    let settings = GitPanelSettings::get_global(cx);
+                    if settings.effective_group_by() == GitPanelGroupBy::Staging {
                         if repo.had_conflict_on_last_merge_head_change(&repo_path) {
                             Section::Conflict
+                        } else if status.is_untracked()
+                            && settings.effective_untracked_changes()
+                                == GitPanelUntrackedChanges::Separate
+                        {
+                            Section::Untracked
                         } else if status.staging().has_staged() {
                             Section::Staged
                         } else {
@@ -3532,6 +3579,9 @@ impl GitPanel {
         };
         let mut set_anchor: Option<RepoPath> = None;
         let mut clear_anchor = None;
+        let untracked_listed_separately = GitPanelSettings::get_global(cx)
+            .effective_untracked_changes()
+            == GitPanelUntrackedChanges::Separate;
 
         let (stage, repo_paths) = {
             let repo = active_repository.read(cx);
@@ -3563,7 +3613,7 @@ impl GitPanel {
                     let entries = self
                         .change_entries_by_path()
                         .filter(|status_entry| {
-                            section.contains(status_entry, &repo)
+                            section.contains(status_entry, &repo, untracked_listed_separately)
                                 && GitPanel::stage_status_for_entry(status_entry, &repo).as_bool()
                                     != Some(goal_staged_state)
                         })
@@ -5725,7 +5775,9 @@ impl GitPanel {
 
         let settings = GitPanelSettings::get_global(cx);
         let sort_by = settings.sort_by;
-        let group_by = settings.group_by;
+        let group_by = settings.effective_group_by();
+        let untracked_changes = settings.effective_untracked_changes();
+        let vscode_layout = settings.is_vscode_layout();
         let group_by_file_status = group_by == GitPanelGroupBy::Status;
         let group_by_staging_state = group_by == GitPanelGroupBy::Staging;
         let is_tree_view = matches!(self.view_mode, GitPanelViewMode::Tree(_));
@@ -5763,6 +5815,7 @@ impl GitPanel {
         let mut staged_entries = Vec::new();
         let mut unstaged_entries = Vec::new();
         let mut tracked_entries = Vec::new();
+        let mut untracked_entries = Vec::new();
         let mut single_staged_entry = None;
         let mut staged_count = 0;
         let mut seen_directories = HashSet::default();
@@ -5780,6 +5833,11 @@ impl GitPanel {
         self.stash_entries = repo.cached_stash();
 
         for status_entry in repo.cached_status() {
+            if untracked_changes == GitPanelUntrackedChanges::Hidden
+                && status_entry.status.is_untracked()
+            {
+                continue;
+            }
             self.changes_count += 1;
             let is_conflict = repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path);
             let is_new = status_entry.status.is_created();
@@ -5820,6 +5878,10 @@ impl GitPanel {
 
             if group_by_staging_state && is_conflict {
                 conflict_entries.push(entry);
+            } else if untracked_changes == GitPanelUntrackedChanges::Separate
+                && status_entry.status.is_untracked()
+            {
+                untracked_entries.push(entry);
             } else if group_by_staging_state {
                 if staging.has_staged() {
                     staged_entries.push(GitStatusEntry {
@@ -5887,6 +5949,7 @@ impl GitPanel {
             sort_entries(&mut new_entries);
             sort_entries(&mut staged_entries);
             sort_entries(&mut unstaged_entries);
+            sort_entries(&mut untracked_entries);
         }
 
         let mut push_entry =
@@ -5927,6 +5990,7 @@ impl GitPanel {
                 (Section::Conflict, std::mem::take(&mut conflict_entries)),
                 (Section::Staged, std::mem::take(&mut staged_entries)),
                 (Section::Unstaged, std::mem::take(&mut unstaged_entries)),
+                (Section::Untracked, std::mem::take(&mut untracked_entries)),
             ]
         } else {
             vec![
@@ -5946,8 +6010,10 @@ impl GitPanel {
                 .iter()
                 .map(|(section, entries)| (*section, entries.len())),
         );
+        // VS Code hides resource groups that have nothing in them.
         let show_when_empty = |section: Section| {
-            group_by_staging_state
+            !vscode_layout
+                && group_by_staging_state
                 && has_any_section_entries
                 && matches!(section, Section::Staged | Section::Unstaged)
         };
@@ -6103,7 +6169,7 @@ impl GitPanel {
             Section::Tracked => (self.tracked_staged_count, self.tracked_count),
             Section::Conflict => (self.conflicted_staged_count, self.conflicted_count),
             Section::Staged => (self.entry_count, self.entry_count),
-            Section::Unstaged => (0, self.entry_count),
+            Section::Unstaged | Section::Untracked => (0, self.entry_count),
         };
         if staged_count == 0 {
             ToggleState::Unselected
@@ -6824,7 +6890,7 @@ impl GitPanel {
         let has_new_changes = self.new_count > 0;
         let has_untracked_files = self.has_untracked_files();
         let has_stash_items = self.stash_entries.entries.len() > 0;
-        let group_by = GitPanelSettings::get_global(cx).group_by;
+        let group_by = GitPanelSettings::get_global(cx).effective_group_by();
 
         let focus_handle = self.focus_handle.clone();
         let menu_open = self.changes_actions_menu_handle.is_deployed();
@@ -8424,6 +8490,9 @@ impl GitPanel {
         _window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            return self.render_vscode_list_header(ix, header, has_write_access, cx);
+        }
         let id: ElementId = ElementId::Name(format!("header_{}", ix).into());
         let checkbox_id: ElementId = ElementId::Name(format!("header_{}_checkbox", ix).into());
         let group_name: SharedString = format!("header_{}", ix).into();
@@ -8475,7 +8544,7 @@ impl GitPanel {
                         .color(Color::Muted),
                     )
                     .child(
-                        Label::new(header.title())
+                        Label::new(header.title(false))
                             .color(Color::Muted)
                             .size(LabelSize::Small),
                     ),
@@ -8537,6 +8606,7 @@ impl GitPanel {
         let message = match section {
             Section::Staged => "No staged changes yet",
             Section::Unstaged => "No unstaged changes",
+            Section::Untracked => "No untracked files",
             _ => "No changes",
         };
         h_flex()
@@ -8549,6 +8619,583 @@ impl GitPanel {
                 Label::new(message)
                     .color(Color::Placeholder)
                     .size(LabelSize::Small),
+            )
+            .into_any_element()
+    }
+
+    /// Applies an inline row action to the multi-selection when the row is
+    /// part of it, and to that row alone otherwise, as VS Code does.
+    fn select_row_for_inline_action(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.row_is_marked(ix) {
+            self.selected_entry = Some(ix);
+            cx.notify();
+        } else {
+            self.clear_marks_and_select(ix, cx);
+        }
+    }
+
+    fn section_status_entries(&self, section: Section) -> Vec<GitStatusEntry> {
+        let mut current_section = None;
+        self.entries
+            .iter()
+            .filter(|entry| {
+                if let GitListEntry::Header(header) = entry {
+                    current_section = Some(header.header);
+                }
+                current_section == Some(section)
+            })
+            .filter_map(GitListEntry::status_entry)
+            .unique_by(|entry| entry.repo_path.clone())
+            .cloned()
+            .collect()
+    }
+
+    fn discard_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        // Discarding "Changes" keeps whatever is already staged, matching the
+        // scope used when discarding a single row of that group.
+        let scope = if section == Section::Unstaged {
+            DiscardScope::Unstaged
+        } else {
+            DiscardScope::All
+        };
+        let targets = self
+            .section_status_entries(section)
+            .into_iter()
+            .map(|entry| DiscardTarget::new(entry, scope))
+            .collect();
+        self.revert_entries(targets, false, window, cx);
+    }
+
+    fn open_section_changes(
+        &mut self,
+        section: Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            if section == Section::Staged {
+                StagedDiff::deploy_at(workspace, None, window, cx);
+            } else {
+                UnstagedDiff::deploy_at(workspace, None, window, cx);
+            }
+        });
+    }
+
+    /// The single-letter decoration VS Code shows at the end of a changed file
+    /// row. Rows in "Staged Changes" describe the index; all others describe
+    /// the working tree.
+    fn vscode_status_decoration(
+        status: git::status::FileStatus,
+        section: Option<Section>,
+    ) -> (&'static str, Color) {
+        use git::status::{FileStatus, StatusCode};
+
+        let tracked = match status {
+            FileStatus::Unmerged(_) => return ("!", Color::VersionControlConflict),
+            FileStatus::Untracked => return ("U", Color::VersionControlAdded),
+            FileStatus::Ignored => return ("I", Color::VersionControlIgnored),
+            FileStatus::Tracked(tracked) => tracked,
+        };
+        let (primary, fallback) = if section == Some(Section::Staged) {
+            (tracked.index_status, tracked.worktree_status)
+        } else {
+            (tracked.worktree_status, tracked.index_status)
+        };
+        let code = if primary == StatusCode::Unmodified {
+            fallback
+        } else {
+            primary
+        };
+        match code {
+            StatusCode::Modified => ("M", Color::VersionControlModified),
+            StatusCode::TypeChanged => ("T", Color::VersionControlModified),
+            StatusCode::Added => ("A", Color::VersionControlAdded),
+            StatusCode::Deleted => ("D", Color::VersionControlDeleted),
+            StatusCode::Renamed => ("R", Color::VersionControlModified),
+            StatusCode::Copied => ("C", Color::VersionControlModified),
+            StatusCode::Unmodified => ("", Color::Muted),
+        }
+    }
+
+    fn render_vscode_list_header(
+        &self,
+        ix: usize,
+        header: &GitHeaderEntry,
+        has_write_access: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let section = header.header;
+        let group_name: SharedString = format!("vscode_header_{ix}").into();
+        let is_collapsed = self.collapsed_sections.contains(&section);
+        let file_count = self
+            .section_file_counts
+            .get(&section)
+            .copied()
+            .unwrap_or_default();
+        let all_conflicts_resolved = section == Section::Conflict
+            && self.conflicted_count > 0
+            && self.conflicted_staged_count == self.conflicted_count;
+
+        let action_button =
+            |id: &'static str,
+             icon: IconName,
+             tooltip: &'static str,
+             handler: fn(&mut Self, Section, &mut Window, &mut Context<Self>)| {
+                IconButton::new(SharedString::from(format!("{id}_{ix}")), icon)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::text(tooltip))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        handler(this, section, window, cx);
+                    }))
+            };
+
+        let stage_all = |this: &mut Self, section, window: &mut Window, cx: &mut Context<Self>| {
+            this.toggle_staged_for_entry(
+                &GitListEntry::Header(GitHeaderEntry { header: section }),
+                StageIntent::Stage,
+                window,
+                cx,
+            );
+        };
+        let unstage_all =
+            |this: &mut Self, section, window: &mut Window, cx: &mut Context<Self>| {
+                this.toggle_staged_for_entry(
+                    &GitListEntry::Header(GitHeaderEntry { header: section }),
+                    StageIntent::Unstage,
+                    window,
+                    cx,
+                );
+            };
+
+        let mut actions = Vec::new();
+        if has_write_access && file_count > 0 {
+            match section {
+                Section::Conflict => {
+                    if !all_conflicts_resolved {
+                        actions.push(action_button(
+                            "stage_all",
+                            IconName::Plus,
+                            "Stage All Merge Changes",
+                            stage_all,
+                        ));
+                    }
+                }
+                Section::Staged => {
+                    actions.push(action_button(
+                        "open_changes",
+                        IconName::Diff,
+                        "Open Staged Changes",
+                        Self::open_section_changes,
+                    ));
+                    actions.push(action_button(
+                        "unstage_all",
+                        IconName::Dash,
+                        "Unstage All Changes",
+                        unstage_all,
+                    ));
+                }
+                Section::Unstaged => {
+                    actions.push(action_button(
+                        "open_changes",
+                        IconName::Diff,
+                        "Open Changes",
+                        Self::open_section_changes,
+                    ));
+                    actions.push(action_button(
+                        "discard_all",
+                        IconName::Undo,
+                        "Discard All Changes",
+                        Self::discard_section,
+                    ));
+                    actions.push(action_button(
+                        "stage_all",
+                        IconName::Plus,
+                        "Stage All Changes",
+                        stage_all,
+                    ));
+                }
+                Section::Untracked => {
+                    actions.push(action_button(
+                        "discard_all",
+                        IconName::Undo,
+                        "Discard All Untracked Changes",
+                        Self::discard_section,
+                    ));
+                    actions.push(action_button(
+                        "stage_all",
+                        IconName::Plus,
+                        "Stage All Untracked Changes",
+                        stage_all,
+                    ));
+                }
+                Section::Tracked | Section::New => {}
+            }
+        }
+
+        h_flex()
+            .id(ElementId::Name(format!("vscode_header_{ix}").into()))
+            .group(group_name.clone())
+            .h(self.list_item_height())
+            .w_full()
+            .pl_1()
+            .pr_1()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+            .child(
+                Icon::new(if is_collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    Label::new(header.title(true))
+                        .size(LabelSize::Small)
+                        .weight(gpui::FontWeight::SEMIBOLD)
+                        .single_line()
+                        .truncate(),
+                ),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_0p5()
+                    .visible_on_hover(group_name)
+                    .children(actions),
+            )
+            .when(file_count > 0, |this| {
+                this.child(Chip::new(file_count.to_string()).label_color(Color::Muted))
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.toggle_section_collapsed(section, window, cx);
+            }))
+            .into_any_element()
+    }
+
+    fn render_vscode_row_actions(
+        &self,
+        ix: usize,
+        section: Option<Section>,
+        is_file: bool,
+        has_write_access: bool,
+        cx: &Context<Self>,
+    ) -> Vec<IconButton> {
+        let mut actions = Vec::new();
+        if is_file {
+            actions.push(
+                IconButton::new(
+                    SharedString::from(format!("vscode_open_file_{ix}")),
+                    IconName::File,
+                )
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .tooltip(Tooltip::text("Open File"))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.select_row_for_inline_action(ix, cx);
+                    this.view_file(&ViewFile, window, cx);
+                })),
+            );
+        }
+        if !has_write_access {
+            return actions;
+        }
+
+        if matches!(section, Some(Section::Unstaged | Section::Untracked)) {
+            actions.push(
+                IconButton::new(
+                    SharedString::from(format!("vscode_discard_{ix}")),
+                    IconName::Undo,
+                )
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .tooltip(Tooltip::text("Discard Changes"))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.select_row_for_inline_action(ix, cx);
+                    this.revert_selected(&RestoreFile::default(), window, cx);
+                })),
+            );
+        }
+
+        if !self.is_resolved_conflict(ix, cx) {
+            let unstages = section == Some(Section::Staged);
+            let (icon, tooltip) = if unstages {
+                (IconName::Dash, "Unstage Changes")
+            } else {
+                (IconName::Plus, "Stage Changes")
+            };
+            actions.push(
+                IconButton::new(SharedString::from(format!("vscode_stage_{ix}")), icon)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::text(tooltip))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.select_row_for_inline_action(ix, cx);
+                        this.toggle_staged_for_selected(&ToggleStaged, window, cx);
+                    })),
+            );
+        }
+        actions
+    }
+
+    fn vscode_row_background(
+        &self,
+        selected: bool,
+        marked: bool,
+        cx: &App,
+    ) -> (gpui::Hsla, gpui::Hsla) {
+        let colors = cx.theme().colors();
+        let info_color = cx.theme().status().info;
+        let base_bg = match (selected, marked) {
+            (true, true) => info_color.alpha(0.2),
+            (true, false) => info_color.alpha(0.08),
+            (false, true) => info_color.alpha(0.12),
+            _ => colors.ghost_element_background,
+        };
+        let hover_bg = if selected || marked {
+            base_bg
+        } else {
+            colors.ghost_element_hover
+        };
+        (base_bg, hover_bg)
+    }
+
+    fn render_vscode_status_entry(
+        &self,
+        ix: usize,
+        entry: &GitStatusEntry,
+        depth: usize,
+        has_write_access: bool,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let settings = GitPanelSettings::get_global(cx);
+        let tree_view = settings.tree_view;
+        let path_style = self.project.read(cx).path_style(cx);
+        let display_name = entry.display_name(path_style);
+        let selected = self.selected_entry == Some(ix);
+        let marked = self.row_is_marked(ix);
+        let section = self.section_for_entry_index(ix);
+        let status = entry.status;
+        let is_deleted = status.is_deleted();
+        let (decoration, decoration_color) = Self::vscode_status_decoration(status, section);
+        let group_name: SharedString = format!("vscode_entry_{ix}").into();
+        let (base_bg, hover_bg) = self.vscode_row_background(selected, marked, cx);
+
+        let file_icon = FileIcons::get_icon(entry.repo_path.as_std_path(), cx)
+            .map(Icon::from_path)
+            .unwrap_or_else(|| Icon::new(IconName::File))
+            .size(IconSize::Small)
+            .color(Color::Muted);
+
+        let directory = if tree_view {
+            None
+        } else {
+            entry.parent_dir(path_style)
+        };
+
+        let handle = cx.weak_entity();
+        h_flex()
+            .id(ElementId::Name(
+                format!("vscode_entry_{display_name}_{ix}").into(),
+            ))
+            .group(group_name.clone())
+            .h(self.list_item_height())
+            .w_full()
+            .pl(px(TREE_INDENT + depth as f32 * TREE_INDENT))
+            .pr_1()
+            .gap_1()
+            .border_1()
+            .when(selected && self.focus_handle.is_focused(window), |el| {
+                el.border_color(cx.theme().colors().panel_focused_border)
+            })
+            .bg(base_bg)
+            .hover(|style| style.bg(hover_bg))
+            .child(file_icon)
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1p5()
+                    .overflow_hidden()
+                    .child(
+                        div().flex_none().child(
+                            self.entry_label(display_name, decoration_color)
+                                .when(is_deleted, Label::strikethrough),
+                        ),
+                    )
+                    .when_some(directory, |this, directory| {
+                        this.child(
+                            div().min_w_0().child(
+                                Label::new(directory)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .single_line()
+                                    .truncate(),
+                            ),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_0p5()
+                    .occlude()
+                    .when(!selected, |this| this.visible_on_hover(group_name))
+                    .children(self.render_vscode_row_actions(
+                        ix,
+                        section,
+                        true,
+                        has_write_access,
+                        cx,
+                    )),
+            )
+            .child(
+                div().flex_none().w(px(14.)).flex().justify_center().child(
+                    Label::new(decoration)
+                        .size(LabelSize::Small)
+                        .color(decoration_color),
+                ),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if event.modifiers().shift {
+                    let anchor_ix = this.selected_entry.unwrap_or(ix);
+                    this.apply_range_gesture(anchor_ix, ix);
+                    this.selected_entry = Some(ix);
+                    cx.notify();
+                } else if event.modifiers().secondary(cx) {
+                    this.toggle_mark(ix, cx);
+                } else {
+                    this.clear_marks_and_select(ix, cx);
+                    this.open_selected_entry_on_click(event.click_count() > 1, window, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                move |event: &MouseDownEvent, window, cx| {
+                    let Some(this) = handle.upgrade() else {
+                        return;
+                    };
+                    this.update(cx, |this, cx| {
+                        this.deploy_entry_context_menu(event.position, ix, window, cx);
+                    });
+                    cx.stop_propagation();
+                },
+            )
+            .into_any_element()
+    }
+
+    fn render_vscode_directory_entry(
+        &self,
+        ix: usize,
+        entry: &GitTreeDirEntry,
+        has_write_access: bool,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let selected = self.selected_entry == Some(ix);
+        let marked = self.marked_directories.contains(&entry.key);
+        let group_name: SharedString = format!("vscode_dir_{ix}").into();
+        let (base_bg, hover_bg) = self.vscode_row_background(selected, marked, cx);
+        let folder_icon = FileIcons::get_folder_indicators(
+            settings::FolderIndicator::Icon,
+            entry.expanded,
+            entry.key.path.as_std_path(),
+            cx,
+        )
+        .icon
+        .map(Icon::from_path)
+        .unwrap_or_else(|| {
+            Icon::new(if entry.expanded {
+                IconName::FolderOpen
+            } else {
+                IconName::Folder
+            })
+        })
+        .size(IconSize::Small)
+        .color(Color::Muted);
+
+        h_flex()
+            .id(ElementId::Name(
+                format!("vscode_dir_{}_{ix}", entry.name).into(),
+            ))
+            .group(group_name.clone())
+            .h(self.list_item_height())
+            .w_full()
+            .min_w_0()
+            .pl(px(entry.depth as f32 * TREE_INDENT))
+            .pr_1()
+            .gap_1()
+            .border_1()
+            .when(selected && self.focus_handle.is_focused(window), |el| {
+                el.border_color(cx.theme().colors().panel_focused_border)
+            })
+            .bg(base_bg)
+            .hover(|style| style.bg(hover_bg))
+            .child(
+                Icon::new(if entry.expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(IconSize::Small)
+                .color(Color::Muted),
+            )
+            .child(folder_icon)
+            .child(
+                div().flex_1().min_w_0().child(
+                    self.entry_label(entry.name.clone(), Color::Default)
+                        .truncate(),
+                ),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_0p5()
+                    .occlude()
+                    .when(!selected, |this| this.visible_on_hover(group_name))
+                    .children(self.render_vscode_row_actions(
+                        ix,
+                        Some(entry.key.section),
+                        false,
+                        has_write_access,
+                        cx,
+                    )),
+            )
+            .on_click({
+                let key = entry.key.clone();
+                cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if event.modifiers().shift {
+                        let anchor_ix = this.selected_entry.unwrap_or(ix);
+                        this.apply_range_gesture(anchor_ix, ix);
+                        this.selected_entry = Some(ix);
+                        cx.notify();
+                    } else if event.modifiers().secondary(cx) {
+                        this.toggle_mark(ix, cx);
+                    } else {
+                        this.clear_marks();
+                        this.selected_entry = Some(ix);
+                        this.toggle_directory(&key, window, cx);
+                    }
+                })
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.deploy_entry_context_menu(event.position, ix, window, cx);
+                }),
             )
             .into_any_element()
     }
@@ -8750,7 +9397,7 @@ impl GitPanel {
             has_new_changes,
             has_untracked_files,
             has_stash_items,
-            GitPanelSettings::get_global(cx).group_by,
+            GitPanelSettings::get_global(cx).effective_group_by(),
             include_copy_paths,
             self.focus_handle.clone(),
             window,
@@ -8809,6 +9456,9 @@ impl GitPanel {
         cx: &Context<Self>,
     ) -> AnyElement {
         let settings = GitPanelSettings::get_global(cx);
+        if settings.is_vscode_layout() {
+            return self.render_vscode_status_entry(ix, entry, depth, has_write_access, window, cx);
+        }
         let tree_view = settings.tree_view;
         let path_style = self.project.read(cx).path_style(cx);
         let git_path_style = ProjectSettings::get_global(cx).git.path_style;
@@ -9081,6 +9731,9 @@ impl GitPanel {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            return self.render_vscode_directory_entry(ix, entry, has_write_access, window, cx);
+        }
         let selected = self.selected_entry == Some(ix);
         let marked = self.marked_directories.contains(&entry.key);
         let label_color = Color::Muted;
@@ -11710,6 +12363,188 @@ mod tests {
                 panel.entry_by_path_in_section(&repo_path("partial.rs"), Section::Unstaged)
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_vscode_layout_groups_and_untracked_changes(cx: &mut TestAppContext) {
+        use GitListEntry::*;
+
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".git": {},
+                "new.rs": "new content",
+                "unstaged.rs": "unstaged content",
+            }),
+        )
+        .await;
+        fs.set_status_for_repo(
+            path!("/project/.git").as_ref(),
+            &[
+                ("new.rs", FileStatus::Untracked),
+                ("unstaged.rs", StatusCode::Modified.worktree()),
+            ],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+
+        // The VS Code layout must override the user's grouping choice.
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let git_panel = settings.git_panel.get_or_insert_default();
+                    git_panel.group_by = Some(GitPanelGroupBy::Status);
+                    git_panel.layout = Some(settings::GitPanelLayout::Vscode);
+                })
+            });
+        });
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(&mut cx, GitPanel::new);
+        await_git_panel_entries(&panel, &mut cx).await;
+
+        // Mixed: untracked files sit in "Changes", and the empty "Staged
+        // Changes" group is not rendered at all.
+        let entries = panel.read_with(&mut cx, |panel, _| panel.entries.clone());
+        #[rustfmt::skip]
+        pretty_assertions::assert_matches!(
+            entries.as_slice(),
+            &[
+                Header(GitHeaderEntry { header: Section::Unstaged }),
+                Status(GitStatusEntry { status: FileStatus::Untracked, .. }),
+                Status(GitStatusEntry { .. }),
+            ],
+        );
+        assert_entry_paths(&entries, &[None, Some("new.rs"), Some("unstaged.rs")]);
+        assert_eq!(
+            GitHeaderEntry {
+                header: Section::Unstaged
+            }
+            .title(true),
+            "Changes"
+        );
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().untracked_changes =
+                        Some(settings::GitPanelUntrackedChanges::Separate);
+                })
+            });
+        });
+        cx.executor().run_until_parked();
+
+        let entries = panel.read_with(&mut cx, |panel, _| panel.entries.clone());
+        #[rustfmt::skip]
+        pretty_assertions::assert_matches!(
+            entries.as_slice(),
+            &[
+                Header(GitHeaderEntry { header: Section::Unstaged }),
+                Status(GitStatusEntry { .. }),
+                Header(GitHeaderEntry { header: Section::Untracked }),
+                Status(GitStatusEntry { status: FileStatus::Untracked, .. }),
+            ],
+        );
+        assert_entry_paths(&entries, &[None, Some("unstaged.rs"), None, Some("new.rs")]);
+        panel.read_with(&mut cx, |panel, cx| {
+            let repo = panel
+                .active_repository
+                .as_ref()
+                .expect("panel should have a repository")
+                .read(cx);
+            let untracked = panel
+                .change_entries_by_path()
+                .find(|entry| entry.status.is_untracked())
+                .expect("untracked entry should be listed");
+            // "Stage All Changes" on "Changes" must not sweep up the separate
+            // untracked group.
+            assert!(
+                !GitHeaderEntry {
+                    header: Section::Unstaged
+                }
+                .contains(untracked, repo, true)
+            );
+            assert!(
+                GitHeaderEntry {
+                    header: Section::Untracked
+                }
+                .contains(untracked, repo, true)
+            );
+            assert_eq!(panel.stage_intent_for_entry_index(3), StageIntent::Stage);
+        });
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().untracked_changes =
+                        Some(settings::GitPanelUntrackedChanges::Hidden);
+                })
+            });
+        });
+        cx.executor().run_until_parked();
+
+        let (entries, changes_count) = panel.read_with(&mut cx, |panel, _| {
+            (panel.entries.clone(), panel.changes_count)
+        });
+        assert_entry_paths(&entries, &[None, Some("unstaged.rs")]);
+        assert_eq!(changes_count, 1);
+    }
+
+    #[test]
+    fn test_vscode_status_decoration() {
+        let decoration = |status: FileStatus, section| {
+            GitPanel::vscode_status_decoration(status, Some(section)).0
+        };
+
+        assert_eq!(decoration(FileStatus::Untracked, Section::Unstaged), "U");
+        assert_eq!(
+            decoration(
+                UnmergedStatus {
+                    first_head: UnmergedStatusCode::Updated,
+                    second_head: UnmergedStatusCode::Updated,
+                }
+                .into(),
+                Section::Conflict
+            ),
+            "!"
+        );
+        let added_then_modified: FileStatus = TrackedStatus {
+            index_status: StatusCode::Added,
+            worktree_status: StatusCode::Modified,
+        }
+        .into();
+        // The same file reads "A" in "Staged Changes" and "M" in "Changes".
+        assert_eq!(decoration(added_then_modified, Section::Staged), "A");
+        assert_eq!(decoration(added_then_modified, Section::Unstaged), "M");
+        assert_eq!(
+            decoration(FileStatus::index(StatusCode::Deleted), Section::Staged),
+            "D"
+        );
+        assert_eq!(
+            decoration(FileStatus::index(StatusCode::Renamed), Section::Unstaged),
+            "R"
+        );
     }
 
     #[gpui::test]
