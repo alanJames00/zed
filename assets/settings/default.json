@@ -1174,6 +1174,10 @@
     // Choices: mixed, separate, hidden
     // Default: mixed
     "untracked_changes": "mixed",
+    // Whether the `vscode` layout lists repositories even when only one is open.
+    //
+    // Default: false
+    "always_show_repositories": false,
   },
   "agent": {
     // Whether the inline assistant should use streaming tools, when available

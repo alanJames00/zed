@@ -829,6 +829,11 @@ pub struct GitPanelSettingsContent {
     ///
     /// Default: mixed
     pub untracked_changes: Option<GitPanelUntrackedChanges>,
+
+    /// Whether the `vscode` layout lists repositories even when only one is open.
+    ///
+    /// Default: false
+    pub always_show_repositories: Option<bool>,
 }
 
 #[derive(

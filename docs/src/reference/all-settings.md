@@ -6210,7 +6210,8 @@ See the [debugger page](../debugger.md) for more information about debugging sup
     "commit_title_max_length": 0,
     "entry_primary_click_action": "project_diff",
     "layout": "zed",
-    "untracked_changes": "mixed"
+    "untracked_changes": "mixed",
+    "always_show_repositories": false
   }
 }
 ```
@@ -6237,6 +6238,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 - `entry_primary_click_action`: Default action when clicking a changed file in the git panel. Can be `project_diff`, `file_diff`, or `view_file`
 - `layout`: Which layout the git panel uses. Can be `zed` or `vscode`. The `vscode` layout groups files into collapsible "Merge Changes", "Staged Changes" and "Changes" sections with inline stage, unstage, discard and open actions
 - `untracked_changes`: Where untracked files are listed when using the `vscode` layout. Can be `mixed`, `separate`, or `hidden`
+- `always_show_repositories`: Whether the `vscode` layout shows the repositories section even when only one repository is open
 
 ## Git Worktree Directory
 

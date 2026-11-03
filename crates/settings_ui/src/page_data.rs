@@ -6541,7 +6541,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn git_panel_section() -> [SettingsPageItem; 21] {
+    fn git_panel_section() -> [SettingsPageItem; 22] {
         [
             SettingsPageItem::SectionHeader("Git Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -6854,6 +6854,29 @@ fn panels_page() -> SettingsPage {
                             .git_panel
                             .get_or_insert_default()
                             .untracked_changes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Always Show Repositories",
+                description: "Whether the VS Code layout lists repositories even when only one is open.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_panel.always_show_repositories"),
+                    pick: |settings_content| {
+                        settings_content
+                            .git_panel
+                            .as_ref()?
+                            .always_show_repositories
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .git_panel
+                            .get_or_insert_default()
+                            .always_show_repositories = value;
                     },
                 }),
                 metadata: None,

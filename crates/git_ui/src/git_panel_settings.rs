@@ -36,6 +36,7 @@ pub struct GitPanelSettings {
     pub commit_editor: GitPanelCommitEditor,
     pub layout: GitPanelLayout,
     pub untracked_changes: GitPanelUntrackedChanges,
+    pub always_show_repositories: bool,
 }
 
 #[derive(Default)]
@@ -112,6 +113,7 @@ impl Settings for GitPanelSettings {
             commit_editor: git_panel.commit_editor.unwrap(),
             layout: git_panel.layout.unwrap(),
             untracked_changes: git_panel.untracked_changes.unwrap(),
+            always_show_repositories: git_panel.always_show_repositories.unwrap(),
         }
     }
 }

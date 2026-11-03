@@ -834,6 +834,8 @@ struct SerializedGitPanel {
     graph_section_collapsed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     graph_section_height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repositories_section_collapsed: Option<bool>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -1533,6 +1535,7 @@ pub struct GitPanel {
     /// Graph" section below the changes instead of a tab.
     graph_section_collapsed: bool,
     graph_section_height: Pixels,
+    repositories_section_collapsed: bool,
     commit_history_scroll_handle: UniformListScrollHandle,
     commit_history: CommitHistory,
     focused_history_entry: Option<usize>,
@@ -1577,6 +1580,8 @@ const DEFAULT_GRAPH_SECTION_HEIGHT: Pixels = px(240.);
 const MIN_GRAPH_SECTION_HEIGHT: Pixels = px(80.);
 const MIN_CHANGES_SECTION_HEIGHT: Pixels = px(120.);
 const GRAPH_SECTION_RESIZE_HANDLE_HEIGHT: Pixels = px(6.);
+/// Rows shown before the repositories section scrolls, as in VS Code.
+const MAX_VISIBLE_REPOSITORY_ROWS: f32 = 5.;
 
 #[derive(Clone)]
 struct DraggedGraphSectionResize;
@@ -1674,6 +1679,10 @@ impl GitPanel {
             .and_then(|panel| panel.graph_section_height)
             .map(px)
             .unwrap_or(DEFAULT_GRAPH_SECTION_HEIGHT);
+        let repositories_section_collapsed = serialized_panel
+            .as_ref()
+            .and_then(|panel| panel.repositories_section_collapsed)
+            .unwrap_or(false);
         let active_work_directory_abs_path = active_repository.as_ref().map(|repository| {
             repository
                 .read(cx)
@@ -1712,6 +1721,8 @@ impl GitPanel {
             let mut was_untracked_changes =
                 GitPanelSettings::get_global(cx).effective_untracked_changes();
             let mut was_layout = GitPanelSettings::get_global(cx).layout;
+            let mut was_always_show_repositories =
+                GitPanelSettings::get_global(cx).always_show_repositories;
             let mut was_tree_view = GitPanelSettings::get_global(cx).tree_view;
             let mut was_file_icons = GitPanelSettings::get_global(cx).file_icons;
             let mut was_folder_indicator = GitPanelSettings::get_global(cx).folder_indicator;
@@ -1769,9 +1780,15 @@ impl GitPanel {
                 if (diff_stats != was_diff_stats) || update_entries {
                     this.update_visible_entries(window, cx);
                 }
-                if file_icons != was_file_icons || folder_indicator != was_folder_indicator {
+                let always_show_repositories =
+                    GitPanelSettings::get_global(cx).always_show_repositories;
+                if file_icons != was_file_icons
+                    || folder_indicator != was_folder_indicator
+                    || always_show_repositories != was_always_show_repositories
+                {
                     cx.notify();
                 }
+                was_always_show_repositories = always_show_repositories;
                 was_sort_by = sort_by;
                 was_group_by = group_by;
                 was_untracked_changes = untracked_changes;
@@ -1846,7 +1863,13 @@ impl GitPanel {
                             })
                             .ok();
                     }
-                    GitStoreEvent::RepositoryUpdated(_, _, _) => {}
+                    // Inactive repositories only appear in the repositories
+                    // section, whose rows show their branch and change count.
+                    GitStoreEvent::RepositoryUpdated(_, _, _) => {
+                        if this.shows_repositories_section(cx) {
+                            cx.notify();
+                        }
+                    }
                     GitStoreEvent::JobsUpdated
                     | GitStoreEvent::ConflictsUpdated
                     | GitStoreEvent::DiffBaseChanged(_) => {}
@@ -1910,6 +1933,7 @@ impl GitPanel {
                 active_tab: GitPanelTab::Changes,
                 graph_section_collapsed,
                 graph_section_height,
+                repositories_section_collapsed,
                 commit_history_scroll_handle: UniformListScrollHandle::new(),
                 commit_history: CommitHistory::Loading,
                 focused_history_entry: None,
@@ -2369,6 +2393,7 @@ impl GitPanel {
         let commit_messages = self.serialized_commit_messages(cx);
         let graph_section_collapsed = Some(self.graph_section_collapsed);
         let graph_section_height = Some(f32::from(self.graph_section_height));
+        let repositories_section_collapsed = Some(self.repositories_section_collapsed);
         let kvp = KeyValueStore::global(cx);
 
         self.pending_serialization = cx.spawn(async move |git_panel, cx| {
@@ -2398,6 +2423,7 @@ impl GitPanel {
                             commit_editor_collapsed,
                             graph_section_collapsed,
                             graph_section_height,
+                            repositories_section_collapsed,
                         })?,
                     )
                     .await?;
@@ -8773,6 +8799,7 @@ impl GitPanel {
             .size_full()
             .on_drag_move(resize_graph_section)
             .children(self.render_changes_header(window, cx))
+            .children(self.render_vscode_repositories_section(cx))
             .child(
                 v_flex()
                     .id("vscode-changes-section")
@@ -8798,6 +8825,210 @@ impl GitPanel {
             )
             .when(self.active_repository.is_some(), |this| {
                 this.child(self.render_vscode_graph_section(window, cx))
+            })
+            .into_any_element()
+    }
+
+    fn shows_repositories_section(&self, cx: &App) -> bool {
+        let settings = GitPanelSettings::get_global(cx);
+        let repository_count = self
+            .project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repositories()
+            .len();
+        settings.is_vscode_layout()
+            && (repository_count > 1
+                || (repository_count == 1 && settings.always_show_repositories))
+    }
+
+    fn sorted_repositories(&self, cx: &App) -> Vec<Entity<Repository>> {
+        let mut repositories: Vec<_> = self
+            .project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repositories()
+            .values()
+            .cloned()
+            .collect();
+        repositories.sort_by_cached_key(|repository| {
+            let repository = repository.read(cx);
+            (
+                repository.display_name().to_lowercase(),
+                repository.work_directory_abs_path.clone(),
+            )
+        });
+        repositories
+    }
+
+    fn set_repositories_section_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        if self.repositories_section_collapsed != collapsed {
+            self.repositories_section_collapsed = collapsed;
+            self.serialize(cx);
+            cx.notify();
+        }
+    }
+
+    fn render_vscode_repositories_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.shows_repositories_section(cx) {
+            return None;
+        }
+        let collapsed = self.repositories_section_collapsed;
+        let active_repository_id = self
+            .active_repository
+            .as_ref()
+            .map(|repository| repository.entity_id());
+
+        let header = h_flex()
+            .id("vscode-repositories-header")
+            .h(Tab::container_height(cx))
+            .w_full()
+            .flex_none()
+            .pl_1()
+            .pr_1()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                Label::new("REPOSITORIES")
+                    .size(LabelSize::XSmall)
+                    .weight(gpui::FontWeight::SEMIBOLD)
+                    .color(Color::Muted)
+                    .single_line(),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.set_repositories_section_collapsed(!collapsed, cx);
+            }));
+
+        let rows = (!collapsed).then(|| {
+            self.sorted_repositories(cx)
+                .into_iter()
+                .enumerate()
+                .map(|(ix, repository)| {
+                    let is_active = Some(repository.entity_id()) == active_repository_id;
+                    self.render_vscode_repository_row(ix, repository, is_active, cx)
+                })
+                .collect::<Vec<_>>()
+        });
+
+        Some(
+            v_flex()
+                .w_full()
+                .flex_none()
+                .border_b_1()
+                .border_color(cx.theme().colors().border)
+                .child(header)
+                .when_some(rows, |this, rows| {
+                    this.child(
+                        v_flex()
+                            .id("vscode-repositories-list")
+                            .w_full()
+                            .max_h(self.list_item_height() * MAX_VISIBLE_REPOSITORY_ROWS)
+                            .overflow_y_scroll()
+                            .pb_1()
+                            .children(rows),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_vscode_repository_row(
+        &self,
+        ix: usize,
+        repository: Entity<Repository>,
+        is_active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let snapshot = repository.read(cx);
+        let name = snapshot.display_name();
+        let change_count = snapshot.status_summary().count;
+        let branch = snapshot.branch.clone();
+        // Detached HEAD has no branch name, so show the short commit instead.
+        let branch_name: SharedString = branch
+            .as_ref()
+            .map(|branch| SharedString::from(branch.name().to_owned()))
+            .or_else(|| {
+                snapshot
+                    .head_commit
+                    .as_ref()
+                    .map(|commit| commit.sha.chars().take(7).collect::<String>().into())
+            })
+            .unwrap_or_default();
+        let sync_label = branch
+            .as_ref()
+            .and_then(|branch| branch.upstream.as_ref())
+            .and_then(|upstream| upstream.tracking.status())
+            .filter(|status| status.ahead > 0 || status.behind > 0)
+            .map(|status| format!("{}↓ {}↑", status.behind, status.ahead));
+        let hover_bg = cx.theme().colors().ghost_element_hover;
+        let selected_bg = cx.theme().status().info.alpha(0.08);
+
+        h_flex()
+            .id(("vscode-repository", ix))
+            .h(self.list_item_height())
+            .w_full()
+            .pl(px(TREE_INDENT))
+            .pr_2()
+            .gap_1p5()
+            .cursor_pointer()
+            .when(is_active, |this| this.bg(selected_bg))
+            .when(!is_active, |this| this.hover(|style| style.bg(hover_bg)))
+            .child(
+                Icon::new(IconName::Book)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Label::new(name).single_line().truncate()),
+            )
+            .when(!branch_name.is_empty(), |this| {
+                this.child(
+                    h_flex()
+                        .flex_none()
+                        .max_w(relative(0.45))
+                        .gap_0p5()
+                        .child(
+                            Icon::new(IconName::GitBranch)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(branch_name)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .single_line()
+                                .truncate(),
+                        ),
+                )
+            })
+            .when_some(sync_label, |this, sync_label| {
+                this.child(
+                    Label::new(sync_label)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .single_line(),
+                )
+            })
+            .when(change_count > 0, |this| {
+                this.child(Chip::new(change_count.to_string()).label_color(Color::Muted))
+            })
+            .on_click(move |_, _, cx| {
+                repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
             })
             .into_any_element()
     }
@@ -17037,6 +17268,136 @@ mod tests {
             assert!(!panel.graph_section_collapsed);
             assert_eq!(panel.graph_section_height, px(300.));
             assert!(!panel._repo_subscriptions.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_vscode_layout_repositories_section(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "zeta": { ".git": {}, "main.rs": "fn main() {}" },
+                "alpha": { ".git": {}, "main.rs": "fn main() {}" },
+            }),
+        )
+        .await;
+        fs.set_status_for_repo(
+            Path::new(path!("/root/zeta/.git")),
+            &[("main.rs", StatusCode::Modified.worktree())],
+        );
+
+        let project = Project::test(
+            fs.clone(),
+            [
+                Path::new(path!("/root/zeta")),
+                Path::new(path!("/root/alpha")),
+            ],
+            cx,
+        )
+        .await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        let panel = workspace.update_in(cx, GitPanel::new);
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            assert!(
+                !panel.shows_repositories_section(cx),
+                "the Zed layout keeps its repository picker"
+            );
+        });
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Vscode);
+                })
+            });
+        });
+        cx.run_until_parked();
+
+        let repositories = panel.read_with(cx, |panel, cx| {
+            assert!(panel.shows_repositories_section(cx));
+            let repositories = panel.sorted_repositories(cx);
+            assert_eq!(
+                repositories
+                    .iter()
+                    .map(|repository| repository.read(cx).display_name())
+                    .collect::<Vec<_>>(),
+                ["alpha", "zeta"]
+            );
+            repositories
+        });
+
+        // Selecting a row makes that repository the one the panel shows.
+        repositories[1].update(cx, |repository, cx| repository.set_as_active_repository(cx));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel
+                    .active_repository
+                    .as_ref()
+                    .map(|repository| repository.read(cx).display_name()),
+                Some("zeta".into())
+            );
+            assert_eq!(panel.entry_count, 1);
+        });
+
+        panel.update(cx, |panel, cx| {
+            panel.set_repositories_section_collapsed(true, cx);
+            assert!(panel.repositories_section_collapsed);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_vscode_layout_always_show_repositories(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({ "project": { ".git": {}, "main.rs": "fn main() {}" } }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Vscode);
+                })
+            });
+        });
+        let panel = workspace.update_in(cx, GitPanel::new);
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            assert!(!panel.shows_repositories_section(cx));
+        });
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .git_panel
+                        .get_or_insert_default()
+                        .always_show_repositories = Some(true);
+                })
+            });
+        });
+        panel.read_with(cx, |panel, cx| {
+            assert!(panel.shows_repositories_section(cx));
         });
     }
 
