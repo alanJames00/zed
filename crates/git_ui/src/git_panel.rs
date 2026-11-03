@@ -830,6 +830,10 @@ struct SerializedGitPanel {
     /// `None` means the user never toggled it, so the setting decides.
     #[serde(default)]
     commit_editor_collapsed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graph_section_collapsed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graph_section_height: Option<f32>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -1525,6 +1529,10 @@ pub struct GitPanel {
     bulk_staging: Option<BulkStaging>,
     stash_entries: GitStash,
     active_tab: GitPanelTab,
+    /// In the VS Code layout the history is a collapsible "Source Control
+    /// Graph" section below the changes instead of a tab.
+    graph_section_collapsed: bool,
+    graph_section_height: Pixels,
     commit_history_scroll_handle: UniformListScrollHandle,
     commit_history: CommitHistory,
     focused_history_entry: Option<usize>,
@@ -1565,6 +1573,19 @@ impl From<&Arc<InitialGraphCommitData>> for CommitHistoryEntry {
 
 const MAX_PANEL_EDITOR_LINES: usize = 6;
 const VSCODE_COMMIT_EDITOR_MAX_LINES: usize = 10;
+const DEFAULT_GRAPH_SECTION_HEIGHT: Pixels = px(240.);
+const MIN_GRAPH_SECTION_HEIGHT: Pixels = px(80.);
+const MIN_CHANGES_SECTION_HEIGHT: Pixels = px(120.);
+const GRAPH_SECTION_RESIZE_HANDLE_HEIGHT: Pixels = px(6.);
+
+#[derive(Clone)]
+struct DraggedGraphSectionResize;
+
+impl Render for DraggedGraphSectionResize {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
 
 pub(crate) fn commit_message_editor(
     commit_message_buffer: Entity<Buffer>,
@@ -1644,6 +1665,15 @@ impl GitPanel {
             .unwrap_or_else(|| {
                 GitPanelSettings::get_global(cx).commit_editor == GitPanelCommitEditor::Collapsed
             });
+        let graph_section_collapsed = serialized_panel
+            .as_ref()
+            .and_then(|panel| panel.graph_section_collapsed)
+            .unwrap_or(true);
+        let graph_section_height = serialized_panel
+            .as_ref()
+            .and_then(|panel| panel.graph_section_height)
+            .map(px)
+            .unwrap_or(DEFAULT_GRAPH_SECTION_HEIGHT);
         let active_work_directory_abs_path = active_repository.as_ref().map(|repository| {
             repository
                 .read(cx)
@@ -1734,6 +1764,7 @@ impl GitPanel {
                 }
                 if layout != was_layout {
                     this.sync_commit_editor_layout(window, cx);
+                    this.sync_commit_history_loading(cx);
                 }
                 if (diff_stats != was_diff_stats) || update_entries {
                     this.update_visible_entries(window, cx);
@@ -1877,6 +1908,8 @@ impl GitPanel {
                 bulk_staging: None,
                 stash_entries: Default::default(),
                 active_tab: GitPanelTab::Changes,
+                graph_section_collapsed,
+                graph_section_height,
                 commit_history_scroll_handle: UniformListScrollHandle::new(),
                 commit_history: CommitHistory::Loading,
                 focused_history_entry: None,
@@ -2334,6 +2367,8 @@ impl GitPanel {
             .commit_editor_toggled
             .then_some(self.commit_editor_collapsed);
         let commit_messages = self.serialized_commit_messages(cx);
+        let graph_section_collapsed = Some(self.graph_section_collapsed);
+        let graph_section_height = Some(f32::from(self.graph_section_height));
         let kvp = KeyValueStore::global(cx);
 
         self.pending_serialization = cx.spawn(async move |git_panel, cx| {
@@ -2361,6 +2396,8 @@ impl GitPanel {
                             signoff_enabled,
                             commit_messages,
                             commit_editor_collapsed,
+                            graph_section_collapsed,
+                            graph_section_height,
                         })?,
                     )
                     .await?;
@@ -5922,14 +5959,14 @@ impl GitPanel {
             }
             self.git_access = None;
             self._repo_subscriptions.clear();
-            if self.active_tab == GitPanelTab::History {
+            if self.history_is_visible(cx) {
                 self.set_commit_history(CommitHistory::Loading, cx);
             }
         }
         self.active_repository = new_active_repository;
         self.reopen_commit_buffer(window, cx);
         self.preload_commit_history(cx);
-        if self.active_tab == GitPanelTab::History {
+        if self.history_is_visible(cx) {
             self.load_commit_history(cx);
         }
         self.update_visible_entries_task = cx.spawn_in(window, async move |_, cx| {
@@ -8515,6 +8552,17 @@ impl GitPanel {
     }
 
     fn set_active_tab(&mut self, tab: GitPanelTab, window: &mut Window, cx: &mut Context<Self>) {
+        if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            // Both sections are on screen, so the "tab" only decides which
+            // list receives keyboard navigation.
+            if tab == GitPanelTab::History && self.graph_section_collapsed {
+                self.set_graph_section_collapsed(false, cx);
+            }
+            self.active_tab = tab;
+            self.activation_focus_handle(cx).focus(window, cx);
+            cx.notify();
+            return;
+        }
         if self.active_tab == tab {
             return;
         }
@@ -8530,6 +8578,228 @@ impl GitPanel {
             }
         }
         cx.notify();
+    }
+
+    fn history_is_visible(&self, cx: &App) -> bool {
+        if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            !self.graph_section_collapsed
+        } else {
+            self.active_tab == GitPanelTab::History
+        }
+    }
+
+    /// Loads the commit history while it is on screen and drops it otherwise,
+    /// so a hidden history doesn't keep refetching on every graph event.
+    fn sync_commit_history_loading(&mut self, cx: &mut Context<Self>) {
+        if self.history_is_visible(cx) {
+            self.load_commit_history(cx);
+        } else {
+            self.set_commit_history(CommitHistory::Loading, cx);
+            self._repo_subscriptions.clear();
+            if self.active_tab == GitPanelTab::History
+                && GitPanelSettings::get_global(cx).is_vscode_layout()
+            {
+                self.active_tab = GitPanelTab::Changes;
+            }
+        }
+    }
+
+    fn set_graph_section_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        if self.graph_section_collapsed == collapsed {
+            return;
+        }
+        self.graph_section_collapsed = collapsed;
+        self.sync_commit_history_loading(cx);
+        self.serialize(cx);
+        cx.notify();
+    }
+
+    fn resize_graph_section(
+        &mut self,
+        height: Pixels,
+        available_height: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let max_height =
+            (available_height - MIN_CHANGES_SECTION_HEIGHT).max(MIN_GRAPH_SECTION_HEIGHT);
+        self.set_graph_section_height(height.max(MIN_GRAPH_SECTION_HEIGHT).min(max_height), cx);
+    }
+
+    fn set_graph_section_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        let height = height.round();
+        if height != self.graph_section_height {
+            self.graph_section_height = height;
+            self.serialize(cx);
+            cx.notify();
+        }
+    }
+
+    fn focus_vscode_section(&mut self, tab: GitPanelTab, cx: &mut Context<Self>) {
+        if self.active_tab != tab {
+            self.active_tab = tab;
+            cx.notify();
+        }
+    }
+
+    fn render_vscode_graph_section(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let collapsed = self.graph_section_collapsed;
+        let group_name: SharedString = "vscode-graph-header".into();
+
+        let resize_handle = div()
+            .id("vscode-graph-resize-handle")
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(-GRAPH_SECTION_RESIZE_HANDLE_HEIGHT / 2.)
+            .h(GRAPH_SECTION_RESIZE_HANDLE_HEIGHT)
+            .cursor_row_resize()
+            .on_drag(DraggedGraphSectionResize, |resize, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| resize.clone())
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseUpEvent, _, cx| {
+                    if event.click_count == 2 {
+                        this.set_graph_section_height(DEFAULT_GRAPH_SECTION_HEIGHT, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .occlude();
+
+        let header = h_flex()
+            .id("vscode-graph-header")
+            .group(group_name.clone())
+            .relative()
+            .h(Tab::container_height(cx))
+            .w_full()
+            .flex_none()
+            .pl_1()
+            .pr_1()
+            .gap_1()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+            .when(!collapsed, |this| this.child(resize_handle))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    Label::new("SOURCE CONTROL GRAPH")
+                        .size(LabelSize::XSmall)
+                        .weight(gpui::FontWeight::SEMIBOLD)
+                        .color(Color::Muted)
+                        .single_line()
+                        .truncate(),
+                ),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_0p5()
+                    .visible_on_hover(group_name)
+                    .child(
+                        IconButton::new("vscode-graph-open", IconName::GitGraph)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(|_window, cx| {
+                                Tooltip::for_action("Open Git Graph", &crate::git_graph::Open, cx)
+                            })
+                            .on_click(|_, window, cx| {
+                                cx.stop_propagation();
+                                window.dispatch_action(crate::git_graph::Open.boxed_clone(), cx)
+                            }),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.set_graph_section_collapsed(!collapsed, cx);
+            }));
+
+        v_flex()
+            .w_full()
+            .flex_none()
+            .child(header)
+            .when(!collapsed, |this| {
+                this.child(
+                    div()
+                        .id("vscode-graph-body")
+                        .h(self.graph_section_height)
+                        .w_full()
+                        .overflow_hidden()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.focus_vscode_section(GitPanelTab::History, cx);
+                            }),
+                        )
+                        .child(self.render_history_tab(window, cx)),
+                )
+            })
+    }
+
+    /// The VS Code layout stacks the changes above a collapsible graph section
+    /// instead of switching between tabs.
+    fn render_vscode_sections(
+        &self,
+        has_write_access: bool,
+        has_entries: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let resize_graph_section = cx.listener(
+            |this, event: &gpui::DragMoveEvent<DraggedGraphSectionResize>, _, cx| {
+                let bounds = event.bounds;
+                // The drag measures the section body, which sits below its header.
+                let height = bounds.bottom() - event.event.position.y - Tab::container_height(cx);
+                this.resize_graph_section(height, bounds.size.height, cx);
+            },
+        );
+
+        v_flex()
+            .size_full()
+            .on_drag_move(resize_graph_section)
+            .children(self.render_changes_header(window, cx))
+            .child(
+                v_flex()
+                    .id("vscode-changes-section")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.focus_vscode_section(GitPanelTab::Changes, cx);
+                        }),
+                    )
+                    .children(self.render_vscode_scm_input(window, cx))
+                    .map(|this| {
+                        if let Some(repo) = self.active_repository.clone()
+                            && has_entries
+                        {
+                            this.child(self.render_entries(has_write_access, repo, window, cx))
+                        } else {
+                            this.child(self.render_empty_state(cx).into_any_element())
+                        }
+                    }),
+            )
+            .when(self.active_repository.is_some(), |this| {
+                this.child(self.render_vscode_graph_section(window, cx))
+            })
+            .into_any_element()
     }
 
     fn preload_commit_history(&mut self, cx: &mut Context<Self>) {
@@ -8562,7 +8832,7 @@ impl GitPanel {
                         event,
                         RepositoryEvent::GraphEvent(_, _) | RepositoryEvent::TagsChanged
                     ) {
-                        if this.active_tab == GitPanelTab::History {
+                        if this.history_is_visible(cx) {
                             this.fetch_commit_history_entries(cx);
                         }
                     }
@@ -11176,7 +11446,9 @@ impl Render for GitPanel {
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
-            .child(
+            .child(if vscode_layout {
+                self.render_vscode_sections(has_write_access, has_entries, window, cx)
+            } else {
                 v_flex()
                     .size_full()
                     .when(!commit_editor_fills_panel, |this| {
@@ -11215,8 +11487,8 @@ impl Render for GitPanel {
                             }),
                         GitPanelTab::History => this.child(self.render_history_tab(window, cx)),
                     })
-                    .into_any_element(),
-            )
+                    .into_any_element()
+            })
             .children(self.context_menu.as_ref().map(|context_menu| {
                 deferred(
                     anchored()
@@ -14827,6 +15099,7 @@ mod tests {
                 signoff_enabled: false,
                 commit_messages: panel.serialized_commit_messages(cx),
                 commit_editor_collapsed: None,
+                ..SerializedGitPanel::default()
             }
         });
 
@@ -14879,6 +15152,7 @@ mod tests {
                     ..Default::default()
                 },
             )]),
+            ..SerializedGitPanel::default()
         };
         let mismatched_panel = workspace.update_in(cx, |workspace, window, cx| {
             GitPanel::new_with_serialized_panel(
@@ -14970,6 +15244,7 @@ mod tests {
             signoff_enabled: false,
             commit_messages: panel.serialized_commit_messages(cx),
             commit_editor_collapsed: None,
+            ..SerializedGitPanel::default()
         });
         let buffer = repository.read_with(cx, |repository, _| {
             repository.commit_message_buffer().unwrap().clone()
@@ -15066,6 +15341,7 @@ mod tests {
             signoff_enabled: false,
             commit_messages: panel.serialized_commit_messages(cx),
             commit_editor_collapsed: None,
+            ..SerializedGitPanel::default()
         });
 
         // Simulate a restart and restore from the serialized state.
@@ -16680,6 +16956,87 @@ mod tests {
                     max_lines: Some(MAX_PANEL_EDITOR_LINES),
                 }
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_vscode_layout_graph_section(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({ "project": { ".git": {}, "src": { "main.rs": "fn main() {}" } } }),
+        )
+        .await;
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Vscode);
+                })
+            });
+        });
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        cx.executor().run_until_parked();
+
+        panel.update_in(cx, |panel, window, cx| {
+            // Collapsed by default, so nothing subscribes to graph updates.
+            assert!(panel.graph_section_collapsed);
+            assert!(!panel.history_is_visible(cx));
+            assert!(panel._repo_subscriptions.is_empty());
+
+            // Activating history expands the section rather than switching tabs.
+            panel.set_active_tab(GitPanelTab::History, window, cx);
+            assert!(!panel.graph_section_collapsed);
+            assert!(panel.history_is_visible(cx));
+            assert!(!panel._repo_subscriptions.is_empty());
+
+            // Moving keyboard focus back to the changes keeps the history loaded.
+            panel.set_active_tab(GitPanelTab::Changes, window, cx);
+            assert_eq!(panel.active_tab, GitPanelTab::Changes);
+            assert!(!panel._repo_subscriptions.is_empty());
+
+            panel.resize_graph_section(px(10.), px(1000.), cx);
+            assert_eq!(panel.graph_section_height, MIN_GRAPH_SECTION_HEIGHT);
+            panel.resize_graph_section(px(5000.), px(1000.), cx);
+            assert_eq!(
+                panel.graph_section_height,
+                px(1000.) - MIN_CHANGES_SECTION_HEIGHT
+            );
+            panel.resize_graph_section(px(300.), px(1000.), cx);
+
+            panel.set_graph_section_collapsed(true, cx);
+            assert!(panel._repo_subscriptions.is_empty());
+            panel.set_graph_section_collapsed(false, cx);
+        });
+
+        let restored_panel = workspace.update_in(cx, |workspace, window, cx| {
+            GitPanel::new_with_serialized_panel(
+                workspace,
+                Some(SerializedGitPanel {
+                    graph_section_collapsed: Some(false),
+                    graph_section_height: Some(300.),
+                    ..SerializedGitPanel::default()
+                }),
+                window,
+                cx,
+            )
+        });
+        cx.executor().run_until_parked();
+        restored_panel.read_with(cx, |panel, _| {
+            assert!(!panel.graph_section_collapsed);
+            assert_eq!(panel.graph_section_height, px(300.));
+            assert!(!panel._repo_subscriptions.is_empty());
         });
     }
 
