@@ -1537,6 +1537,9 @@ pub struct GitPanel {
     graph_section_height: Pixels,
     repositories_section_collapsed: bool,
     commit_history_scroll_handle: UniformListScrollHandle,
+    /// Branch lanes for the commit history, drawn only by the VS Code layout's
+    /// graph section.
+    commit_history_graph: Option<Rc<crate::git_graph::CommitGraphLayout>>,
     commit_history: CommitHistory,
     focused_history_entry: Option<usize>,
     history_keyboard_nav: bool,
@@ -1582,6 +1585,8 @@ const MIN_CHANGES_SECTION_HEIGHT: Pixels = px(120.);
 const GRAPH_SECTION_RESIZE_HANDLE_HEIGHT: Pixels = px(6.);
 /// Rows shown before the repositories section scrolls, as in VS Code.
 const MAX_VISIBLE_REPOSITORY_ROWS: f32 = 5.;
+/// Lanes shown in the narrow graph section before further lanes are cut off.
+const MAX_GRAPH_SECTION_LANES: usize = 6;
 
 #[derive(Clone)]
 struct DraggedGraphSectionResize;
@@ -1935,6 +1940,7 @@ impl GitPanel {
                 graph_section_height,
                 repositories_section_collapsed,
                 commit_history_scroll_handle: UniformListScrollHandle::new(),
+                commit_history_graph: None,
                 commit_history: CommitHistory::Loading,
                 focused_history_entry: None,
                 history_keyboard_nav: false,
@@ -9101,20 +9107,33 @@ impl GitPanel {
         };
         let log_order = LogOrder::DateOrder;
 
-        let (entries, is_loading, error) = active_repository.update(cx, |repository, cx| {
+        let build_graph = GitPanelSettings::get_global(cx).is_vscode_layout();
+        let (entries, graph, is_loading, error) = active_repository.update(cx, |repository, cx| {
             let response = repository.graph_data(log_source, log_order, 0..usize::MAX, cx);
             let entries: Rc<[CommitHistoryEntry]> = response
                 .commits
                 .iter()
                 .map(CommitHistoryEntry::from)
                 .collect();
-            (entries, response.is_loading, response.error)
+            let graph = build_graph.then(|| {
+                Rc::new(crate::git_graph::CommitGraphLayout::new(
+                    response.commits,
+                    cx,
+                ))
+            });
+            (entries, graph, response.is_loading, response.error)
         });
 
         self.set_commit_history(commit_history_from_response(entries, is_loading, error), cx);
+        self.commit_history_graph = graph.filter(|_| {
+            matches!(&self.commit_history, CommitHistory::Loaded(entries) if !entries.is_empty())
+        });
     }
 
     fn set_commit_history(&mut self, commit_history: CommitHistory, cx: &mut Context<Self>) {
+        if !matches!(commit_history, CommitHistory::Loaded(_)) {
+            self.commit_history_graph = None;
+        }
         let changed = self.commit_history != commit_history;
         self.commit_history = commit_history;
         // Keep the focused entry within range as the history grows or clears.
@@ -9185,8 +9204,50 @@ impl GitPanel {
             .map(|s| s.ahead as usize)
             .unwrap_or(0);
 
+        // The lanes are laid out from the same commit list, so a length mismatch
+        // means they belong to an older fetch and would point at the wrong rows.
+        let commit_graph = self.commit_history_graph.clone().filter(|graph| {
+            GitPanelSettings::get_global(cx).is_vscode_layout()
+                && graph.commit_count() == item_count
+        });
+        let graph_column_width = commit_graph
+            .as_ref()
+            .map(|graph| graph.column_width(MAX_GRAPH_SECTION_LANES));
+        let graph_canvas = commit_graph.zip(graph_column_width).map(|(graph, width)| {
+            let scroll_handle = commit_history_scroll_handle.clone();
+            let background = cx.theme().colors().panel_background;
+            gpui::canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| {
+                    let (scroll_offset, item_size) = {
+                        let state = scroll_handle.0.borrow();
+                        (-state.base_handle.offset().y, state.last_item_size)
+                    };
+                    let Some(item_size) = item_size else {
+                        return;
+                    };
+                    let row_height = item_size.contents.height / graph.commit_count() as f32;
+                    graph.paint(
+                        scroll_offset,
+                        row_height,
+                        item_size.item.height,
+                        background,
+                        bounds,
+                        window,
+                        cx,
+                    );
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .bottom_0()
+            .w(width)
+        });
+
         Some(
             v_flex()
+                .relative()
                 .flex_1()
                 .size_full()
                 .overflow_hidden()
@@ -9287,6 +9348,7 @@ impl GitPanel {
                                         .w_full()
                                         .py_1()
                                         .px_2()
+                                        .when_some(graph_column_width, |this, width| this.pl(width))
                                         .gap_0p5()
                                         .border_1()
                                         .border_color(gpui::transparent_black())
@@ -9476,6 +9538,7 @@ impl GitPanel {
                     .size_full()
                     .track_scroll(&commit_history_scroll_handle),
                 )
+                .children(graph_canvas)
                 .vertical_scrollbar_for(&commit_history_scroll_handle, window, cx),
         )
     }
@@ -13188,6 +13251,77 @@ mod tests {
                     tag_names: Vec::new(),
                 }]))
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_vscode_layout_graph_section_lays_out_lanes(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Vscode);
+                })
+            });
+        });
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree("/root", json!({ "project": { ".git": {} } }))
+            .await;
+
+        // A merge commit, so the history needs a second lane.
+        let root: Oid = "1111111111111111111111111111111111111111".parse().unwrap();
+        let side: Oid = "2222222222222222222222222222222222222222".parse().unwrap();
+        let merge: Oid = "3333333333333333333333333333333333333333".parse().unwrap();
+        let commit = |sha: Oid, parents: &[Oid]| {
+            Arc::new(git::repository::InitialGraphCommitData {
+                sha,
+                parents: parents.iter().copied().collect(),
+                ref_names: Vec::new(),
+            })
+        };
+        let dot_git = Path::new(path!("/root/project/.git"));
+        fs.with_git_state(dot_git, false, |state| {
+            state.current_branch_name = None;
+            state.refs.insert("HEAD".into(), merge.to_string());
+            state.graph_commits = vec![
+                commit(merge, &[root, side]),
+                commit(side, &[root]),
+                commit(root, &[]),
+            ];
+        })
+        .unwrap();
+
+        // In the VS Code layout, activating history expands the graph section.
+        let panel = history_panel_for_project(fs.clone(), cx).await;
+        wait_for_commit_history_to_settle(&panel, cx).await;
+
+        panel.read_with(cx, |panel, _| {
+            assert!(!panel.graph_section_collapsed);
+            let graph = panel
+                .commit_history_graph
+                .as_ref()
+                .expect("the graph section should lay out lanes");
+            assert_eq!(graph.commit_count(), 3);
+            assert!(
+                graph.column_width(MAX_GRAPH_SECTION_LANES) > graph.column_width(1),
+                "the merge should widen the lane column beyond one lane"
+            );
+        });
+
+        // The Zed layout's History tab keeps its plain list.
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Zed);
+                })
+            });
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.commit_history_graph.is_none());
         });
     }
 
