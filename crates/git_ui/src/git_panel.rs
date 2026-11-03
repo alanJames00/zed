@@ -5276,7 +5276,7 @@ impl GitPanel {
     }
 
     /// Pulls and then pushes, like VS Code's "Sync Changes".
-    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pull_then(false, true, window, cx);
     }
 
@@ -8585,7 +8585,7 @@ impl GitPanel {
                 self.set_graph_section_collapsed(false, cx);
             }
             self.active_tab = tab;
-            self.activation_focus_handle(cx).focus(window, cx);
+            self.focus_handle.focus(window, cx);
             cx.notify();
             return;
         }
@@ -8604,6 +8604,17 @@ impl GitPanel {
             }
         }
         cx.notify();
+    }
+
+    /// Where focus returns after a context menu opened from the panel closes.
+    /// The VS Code layout activates into the commit box, but menus are opened
+    /// from the lists, so focus goes back there.
+    fn list_focus_handle(&self, cx: &App) -> FocusHandle {
+        if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            self.focus_handle.clone()
+        } else {
+            self.activation_focus_handle(cx)
+        }
     }
 
     fn history_is_visible(&self, cx: &App) -> bool {
@@ -10817,7 +10828,7 @@ impl GitPanel {
                         .focus_handle(cx)
                         .contains_focused(window, cx)
                 }) {
-                    this.activation_focus_handle(cx).focus(window, cx);
+                    this.list_focus_handle(cx).focus(window, cx);
                 }
                 this.context_menu.take();
                 cx.notify();
@@ -11769,6 +11780,13 @@ impl editor::Addon for GitPanelAddon {
 
 impl Panel for GitPanel {
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
+        // VS Code puts the cursor in the commit message box when the view opens.
+        if GitPanelSettings::get_global(cx).is_vscode_layout()
+            && self.active_repository.is_some()
+            && !matches!(self.git_access, Some(GitAccess::No))
+        {
+            return self.commit_editor.focus_handle(cx);
+        }
         if self.active_tab == GitPanelTab::Changes
             && !self.commit_editor_collapsed
             && (self.entries.is_empty() || self.commit_editor_expanded)
@@ -17398,6 +17416,54 @@ mod tests {
         });
         panel.read_with(cx, |panel, cx| {
             assert!(panel.shows_repositories_section(cx));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_vscode_layout_activation_focuses_commit_box(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/project"),
+            json!({ ".git": {}, "main.rs": "fn main() {}" }),
+        )
+        .await;
+        fs.set_status_for_repo(
+            path!("/project/.git").as_ref(),
+            &[("main.rs", StatusCode::Modified.worktree())],
+        );
+        let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        let panel = workspace.update_in(cx, GitPanel::new);
+        await_git_panel_entries(&panel, cx).await;
+
+        // With changes listed, the Zed layout activates into the list.
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.activation_focus_handle(cx), panel.focus_handle);
+        });
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Vscode);
+                })
+            });
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel.activation_focus_handle(cx),
+                panel.commit_editor.focus_handle(cx)
+            );
+            // Menus are opened from the lists, so dismissing one returns there.
+            assert_eq!(panel.list_focus_handle(cx), panel.focus_handle);
         });
     }
 
