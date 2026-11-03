@@ -497,6 +497,259 @@ fn git_panel_view_options_menu(
     })
 }
 
+/// Snapshot of the panel state the VS Code "More Actions…" menu needs, taken
+/// when the menu opens so the menu can be built without borrowing the panel.
+#[derive(Clone, Copy)]
+struct VscodeMoreActionsState {
+    tree_view: bool,
+    sort_by: GitPanelSortBy,
+    can_write: bool,
+    can_push_and_pull: bool,
+    has_staged_changes: bool,
+    has_unstaged_changes: bool,
+    has_staged_tracked_changes: bool,
+    has_untracked_files: bool,
+    has_changes: bool,
+    has_stash_items: bool,
+    has_previous_commit: bool,
+    amend: bool,
+    signoff: bool,
+}
+
+fn vscode_more_actions_menu(
+    state: VscodeMoreActionsState,
+    focus_handle: FocusHandle,
+    git_panel: WeakEntity<GitPanel>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<ContextMenu> {
+    let can_write = state.can_write;
+    let can_remote = state.can_write && state.can_push_and_pull;
+
+    ContextMenu::build(window, cx, move |context_menu, _, _| {
+        context_menu
+            .context(focus_handle.clone())
+            .submenu("Views & Sort", {
+                let focus_handle = focus_handle.clone();
+                move |menu, _, _| {
+                    menu.context(focus_handle.clone())
+                        .header("View & Sort")
+                        .toggleable_entry(
+                            "View as List",
+                            !state.tree_view,
+                            IconPosition::End,
+                            None,
+                            move |window, cx| {
+                                if state.tree_view {
+                                    window.dispatch_action(Box::new(ToggleTreeView), cx);
+                                }
+                            },
+                        )
+                        .toggleable_entry(
+                            "View as Tree",
+                            state.tree_view,
+                            IconPosition::End,
+                            None,
+                            move |window, cx| {
+                                if !state.tree_view {
+                                    window.dispatch_action(Box::new(ToggleTreeView), cx);
+                                }
+                            },
+                        )
+                        .separator()
+                        .toggleable_entry(
+                            "Sort by Name",
+                            state.sort_by == GitPanelSortBy::Name,
+                            IconPosition::End,
+                            None,
+                            |window, cx| window.dispatch_action(Box::new(SetSortByName), cx),
+                        )
+                        .toggleable_entry(
+                            "Sort by Path",
+                            state.sort_by == GitPanelSortBy::Path,
+                            IconPosition::End,
+                            None,
+                            |window, cx| window.dispatch_action(Box::new(SetSortByPath), cx),
+                        )
+                }
+            })
+            .separator()
+            .action_disabled_when(!can_remote, "Pull", git::Pull.boxed_clone())
+            .action_disabled_when(!can_remote, "Push", git::Push.boxed_clone())
+            .action("Clone", git::Clone.boxed_clone())
+            .action("Checkout to…", zed_actions::git::Switch.boxed_clone())
+            .action_disabled_when(!can_remote, "Fetch", git::Fetch.boxed_clone())
+            .separator()
+            .submenu("Commit", {
+                let focus_handle = focus_handle.clone();
+                move |menu, _, _| {
+                    menu.context(focus_handle.clone())
+                        .action_disabled_when(
+                            !can_write || !state.has_changes,
+                            "Commit",
+                            Commit.boxed_clone(),
+                        )
+                        .when(state.has_previous_commit, |menu| {
+                            menu.toggleable_entry(
+                                "Amend",
+                                state.amend,
+                                IconPosition::Start,
+                                Some(Box::new(Amend)),
+                                |window, cx| window.dispatch_action(Box::new(Amend), cx),
+                            )
+                        })
+                        .toggleable_entry(
+                            "Signoff",
+                            state.signoff,
+                            IconPosition::Start,
+                            Some(Box::new(Signoff)),
+                            |window, cx| window.dispatch_action(Box::new(Signoff), cx),
+                        )
+                        .separator()
+                        .action_disabled_when(
+                            !can_write || !state.has_previous_commit,
+                            "Undo Last Commit",
+                            git::Uncommit.boxed_clone(),
+                        )
+                }
+            })
+            .submenu("Changes", {
+                let focus_handle = focus_handle.clone();
+                move |menu, _, _| {
+                    menu.context(focus_handle.clone())
+                        .action_disabled_when(
+                            !can_write || !state.has_unstaged_changes,
+                            "Stage All Changes",
+                            StageAll.boxed_clone(),
+                        )
+                        .action_disabled_when(
+                            !can_write || !state.has_staged_changes,
+                            "Unstage All Changes",
+                            UnstageAll.boxed_clone(),
+                        )
+                        .separator()
+                        .action_disabled_when(
+                            !can_write || !state.has_staged_tracked_changes,
+                            "Discard All Tracked Changes",
+                            RestoreTrackedFiles.boxed_clone(),
+                        )
+                        .action_disabled_when(
+                            !can_write || !state.has_untracked_files,
+                            "Discard All Untracked Files",
+                            TrashUntrackedFiles.boxed_clone(),
+                        )
+                }
+            })
+            .submenu("Pull, Push", {
+                let focus_handle = focus_handle.clone();
+                let git_panel = git_panel.clone();
+                move |menu, _, _| {
+                    let git_panel = git_panel.clone();
+                    menu.context(focus_handle.clone())
+                        .item(ContextMenuEntry::new("Sync").disabled(!can_remote).handler(
+                            move |window, cx| {
+                                git_panel
+                                    .update(cx, |git_panel, cx| git_panel.sync(window, cx))
+                                    .ok();
+                            },
+                        ))
+                        .separator()
+                        .action_disabled_when(!can_remote, "Pull", git::Pull.boxed_clone())
+                        .action_disabled_when(
+                            !can_remote,
+                            "Pull (Rebase)",
+                            git::PullRebase.boxed_clone(),
+                        )
+                        .separator()
+                        .action_disabled_when(!can_remote, "Push", git::Push.boxed_clone())
+                        .action_disabled_when(!can_remote, "Push to…", git::PushTo.boxed_clone())
+                        .action_disabled_when(
+                            !can_remote,
+                            "Force Push",
+                            git::ForcePush.boxed_clone(),
+                        )
+                        .separator()
+                        .action_disabled_when(!can_remote, "Fetch", git::Fetch.boxed_clone())
+                        .action_disabled_when(
+                            !can_remote,
+                            "Fetch From…",
+                            git::FetchFrom.boxed_clone(),
+                        )
+                }
+            })
+            .submenu("Branch", {
+                let focus_handle = focus_handle.clone();
+                move |menu, _, _| {
+                    menu.context(focus_handle.clone())
+                        .action(
+                            "Create or Checkout Branch…",
+                            zed_actions::git::Branch.boxed_clone(),
+                        )
+                        .action_disabled_when(
+                            !can_write,
+                            "Rename Branch…",
+                            git::RenameBranch::default().boxed_clone(),
+                        )
+                        .action("Copy Branch Name", git::CopyBranchName.boxed_clone())
+                        .separator()
+                        .action(
+                            "Create Pull Request",
+                            zed_actions::git::CreatePullRequest.boxed_clone(),
+                        )
+                }
+            })
+            .submenu("Stash", {
+                let focus_handle = focus_handle.clone();
+                move |menu, _, _| {
+                    menu.context(focus_handle.clone())
+                        .action_disabled_when(
+                            !can_write || !state.has_changes,
+                            "Stash",
+                            StashAll.boxed_clone(),
+                        )
+                        .action_disabled_when(
+                            !can_write || !state.has_staged_changes,
+                            "Stash Staged",
+                            StashStaged.boxed_clone(),
+                        )
+                        .action_disabled_when(
+                            !can_write || !state.has_changes,
+                            "Stash Tracked",
+                            StashTracked.boxed_clone(),
+                        )
+                        .separator()
+                        .action_disabled_when(
+                            !can_write || !state.has_stash_items,
+                            "Apply Latest Stash",
+                            StashApply.boxed_clone(),
+                        )
+                        .action_disabled_when(
+                            !can_write || !state.has_stash_items,
+                            "Pop Latest Stash",
+                            StashPop.boxed_clone(),
+                        )
+                        .action("View Stash…", zed_actions::git::ViewStash.boxed_clone())
+                }
+            })
+            .submenu("Tags", {
+                let focus_handle = focus_handle.clone();
+                move |menu, _, _| {
+                    menu.context(focus_handle.clone()).action_disabled_when(
+                        !can_write || !state.has_previous_commit,
+                        "Create Tag…",
+                        git::CreateTagAtHead.boxed_clone(),
+                    )
+                }
+            })
+            .submenu("Worktrees", move |menu, _, _| {
+                menu.context(focus_handle.clone())
+                    .action("Open Worktree…", zed_actions::git::Worktree.boxed_clone())
+            })
+            .separator()
+            .action("Open Git Graph", crate::git_graph::Open.boxed_clone())
+    })
+}
+
 // We only allow a single remote operation at a time to avoid concurrent
 // credential prompts and competing ref/working-tree updates.
 #[derive(Clone, Copy)]
@@ -7024,7 +7277,11 @@ impl GitPanel {
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    ) -> Option<AnyElement> {
+        if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            return Some(self.render_vscode_title_bar(cx).into_any_element());
+        }
+
         if matches!(self.git_access, Some(GitAccess::No)) {
             return None;
         }
@@ -7086,8 +7343,137 @@ impl GitPanel {
                         .gap_1()
                         .child(self.render_view_options_menu("view_options_menu"))
                         .child(self.render_git_changes_actions_button(cx)),
-                ),
+                )
+                .into_any_element(),
         )
+    }
+
+    fn render_vscode_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tree_view = GitPanelSettings::get_global(cx).tree_view;
+        let repository_count = self
+            .project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repositories()
+            .len();
+        let repository_name = self
+            .active_repository
+            .as_ref()
+            .filter(|_| repository_count > 1)
+            .map(|repository| {
+                SharedString::from(
+                    repository
+                        .read(cx)
+                        .display_name()
+                        .trim_end_matches('/')
+                        .to_string(),
+                )
+            });
+        let has_repository = self.active_repository.is_some();
+        let (tree_icon, tree_tooltip) = if tree_view {
+            (IconName::ListCollapse, "View as List")
+        } else {
+            (IconName::ListTree, "View as Tree")
+        };
+        let focus_handle = self.focus_handle.clone();
+
+        h_flex()
+            .h(Tab::container_height(cx))
+            .w_full()
+            .flex_none()
+            .pl_2()
+            .pr_1()
+            .gap_1()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        Label::new("SOURCE CONTROL")
+                            .size(LabelSize::XSmall)
+                            .weight(gpui::FontWeight::SEMIBOLD)
+                            .color(Color::Muted)
+                            .single_line(),
+                    )
+                    .when_some(repository_name, |this, repository_name| {
+                        this.child(
+                            Label::new(repository_name)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .single_line()
+                                .truncate(),
+                        )
+                    }),
+            )
+            .when(has_repository, |this| {
+                this.child(
+                    IconButton::new("vscode-toggle-tree-view", tree_icon)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::for_action_title_in(
+                            tree_tooltip,
+                            &ToggleTreeView,
+                            &focus_handle,
+                        ))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.toggle_tree_view(&ToggleTreeView, window, cx);
+                        })),
+                )
+                .child(
+                    IconButton::new("vscode-open-changes", IconName::Diff)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::for_action_title_in(
+                            "Open All Changes",
+                            &Diff,
+                            &focus_handle,
+                        ))
+                        .on_click(|_, _, cx| {
+                            cx.defer(|cx| {
+                                cx.dispatch_action(&Diff);
+                            })
+                        }),
+                )
+                .child(self.render_vscode_more_actions_menu(cx))
+            })
+    }
+
+    fn render_vscode_more_actions_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = GitPanelSettings::get_global(cx);
+        let state = VscodeMoreActionsState {
+            tree_view: settings.tree_view,
+            sort_by: settings.sort_by,
+            can_write: self.has_write_access(cx),
+            can_push_and_pull: self.can_push_and_pull(cx),
+            has_staged_changes: self.has_staged_changes(),
+            has_unstaged_changes: self.has_unstaged_changes(),
+            has_staged_tracked_changes: self.has_staged_tracked_changes(),
+            has_untracked_files: self.has_untracked_files(),
+            has_changes: self.entry_count > 0,
+            has_stash_items: !self.stash_entries.entries.is_empty(),
+            has_previous_commit: self.head_commit(cx).is_some(),
+            amend: self.amend_pending(),
+            signoff: self.signoff_enabled,
+        };
+        let focus_handle = self.focus_handle.clone();
+        let git_panel = cx.weak_entity();
+
+        PopoverMenu::new("vscode-more-actions")
+            .trigger_with_tooltip(
+                IconButton::new("vscode-more-actions-trigger", IconName::Ellipsis)
+                    .icon_size(IconSize::Small),
+                Tooltip::text("More Actions…"),
+            )
+            .menu(move |window, cx| {
+                Some(vscode_more_actions_menu(
+                    state,
+                    focus_handle.clone(),
+                    git_panel.clone(),
+                    window,
+                    cx,
+                ))
+            })
+            .anchor(Anchor::TopRight)
     }
 
     pub(crate) fn render_remote_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -9726,6 +10112,56 @@ impl GitPanel {
         } else {
             "View File History"
         };
+        if GitPanelSettings::get_global(cx).is_vscode_layout() {
+            let open_file_title = if plural { "Open Files" } else { "Open File" };
+            let open_changes_title = if plural {
+                "Open Changes for Files"
+            } else {
+                "Open Changes"
+            };
+            let ignore_title = if is_bulk && plural {
+                "Add Files to .gitignore"
+            } else {
+                "Add to .gitignore"
+            };
+            let exclude_title = if is_bulk && plural {
+                "Add Files to .git/info/exclude"
+            } else {
+                "Add to .git/info/exclude"
+            };
+            return ContextMenu::build(window, cx, |context_menu, _, _| {
+                context_menu
+                    .context(self.focus_handle.clone())
+                    .when(is_file_or_bulk, |context_menu| {
+                        context_menu
+                            .action(open_changes_title, menu::Confirm.boxed_clone())
+                            .action(open_file_diff_title, menu::SecondaryConfirm.boxed_clone())
+                            .action(open_file_title, ViewFile.boxed_clone())
+                            .separator()
+                    })
+                    .action(stage_title, ToggleStaged.boxed_clone())
+                    .action(restore_title, RestoreFile::default().boxed_clone())
+                    .separator()
+                    .action_disabled_when(
+                        !all_created,
+                        ignore_title,
+                        git::AddToGitignore.boxed_clone(),
+                    )
+                    .action_disabled_when(
+                        !all_created,
+                        exclude_title,
+                        git::AddToGitInfoExclude.boxed_clone(),
+                    )
+                    .separator()
+                    .action(copy_path_title, CopyPath.boxed_clone())
+                    .action(copy_relative_path_title, CopyRelativePath.boxed_clone())
+                    .when(is_file_or_bulk && has_tracked, |context_menu| {
+                        context_menu
+                            .separator()
+                            .action(view_file_history_title, Box::new(git::FileHistory))
+                    })
+            });
+        }
         ContextMenu::build(window, cx, |context_menu, _, _| {
             context_menu
                 .context(self.focus_handle.clone())
@@ -13691,6 +14127,96 @@ mod tests {
             assert_eq!(workspace.items_of_type::<StagedDiff>(cx).count(), 1);
             assert_eq!(workspace.items_of_type::<UnstagedDiff>(cx).count(), 1);
             assert_eq!(workspace.items_of_type::<ProjectDiff>(cx).count(), 0);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_vscode_layout_entry_context_menu_opens_changes_first(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".git": {},
+                "unstaged.rs": "unstaged content",
+            }),
+        )
+        .await;
+        fs.set_status_for_repo(
+            path!("/project/.git").as_ref(),
+            &[("unstaged.rs", StatusCode::Modified.worktree())],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Vscode);
+                })
+            });
+        });
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(&mut cx, GitPanel::new);
+        await_git_panel_entries(&panel, &mut cx).await;
+        // The menu dispatches its actions through the panel's focus handle,
+        // so the panel has to be docked and drawn for them to be handled.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let menu = panel.update_in(&mut cx, |panel, window, cx| {
+            let index = panel
+                .entry_by_path(&repo_path("unstaged.rs"))
+                .expect("unstaged.rs should be listed");
+            panel.deploy_entry_context_menu(Point::default(), index, window, cx);
+            panel
+                .context_menu
+                .as_ref()
+                .expect("context menu should be open")
+                .menu
+                .clone()
+        });
+        cx.run_until_parked();
+
+        // VS Code puts "Open Changes" first, where the Zed layout puts staging.
+        menu.update_in(&mut cx, |menu, window, cx| {
+            menu.select_first(&menu::SelectFirst, window, cx);
+            menu.confirm(&menu::Confirm, window, cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace.active_item_as::<UnstagedDiff>(cx).is_some(),
+                "the first menu entry should open the file's changes"
+            );
+        });
+        panel.read_with(&cx, |panel, _| {
+            assert!(!panel.has_staged_changes(), "nothing should be staged");
         });
     }
 
