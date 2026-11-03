@@ -6209,7 +6209,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
     "diff_stats": true,
     "commit_title_max_length": 0,
     "entry_primary_click_action": "project_diff",
-    "layout": "zed",
+    "layout": "vscode",
     "untracked_changes": "mixed",
     "always_show_repositories": false
   }
@@ -6226,7 +6226,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 - `folder_indicator`: What to show for directories in the git panel. Can be `icon`, `chevron`, or `both`
 - `fallback_branch_name`: What branch name to use if `init.defaultBranch` is not set
 - `sort_by`: How to sort entries in the git panel. Can be `path` or `name`
-- `group_by`: How to group entries in the git panel. Can be `none` or `status`
+- `group_by`: How to group entries in the git panel. Can be `none`, `status` or `staging`. Only applies to the `zed` layout; the `vscode` layout always groups by staging state
 - `collapse_untracked_diff`: Whether to collapse untracked files in the diff panel
 - `tree_view`: Whether to show entries in tree or flat view in the panel
 - `scrollbar`: When to show the scrollbar in the git panel
@@ -6236,7 +6236,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 - `diff_stats`: Whether to show the addition/deletion change count next to each file in the git panel
 - `commit_title_max_length`: Maximum length of the commit message title before a warning is shown. Set to `0` to disable
 - `entry_primary_click_action`: Default action when clicking a changed file in the git panel. Can be `project_diff`, `file_diff`, or `view_file`
-- `layout`: Which layout the git panel uses. Can be `zed` or `vscode`. The `vscode` layout groups files into collapsible "Merge Changes", "Staged Changes" and "Changes" sections with inline stage, unstage, discard and open actions
+- `layout`: Which layout the git panel uses. Can be `vscode` (the default) or `zed`. The `vscode` layout groups files into collapsible "Merge Changes", "Staged Changes" and "Changes" sections with inline stage, unstage, discard and open actions
 - `untracked_changes`: Where untracked files are listed when using the `vscode` layout. Can be `mixed`, `separate`, or `hidden`
 - `always_show_repositories`: Whether the `vscode` layout shows the repositories section even when only one repository is open
 

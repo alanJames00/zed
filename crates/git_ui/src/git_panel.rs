@@ -12479,6 +12479,14 @@ mod tests {
             language_model::init(cx);
             editor::init(cx);
             crate::init(cx);
+            // Most panel tests cover the Zed layout's grouping, checkboxes and
+            // focus rules; the VS Code layout tests opt in explicitly.
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().layout =
+                        Some(settings::GitPanelLayout::Zed);
+                })
+            });
         });
     }
 

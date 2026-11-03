@@ -32,6 +32,30 @@ In the panel you can see the state of your project at a glance: which repository
 
 Zed monitors your repository so that changes you make on the command line are instantly reflected.
 
+### Panel Layout
+
+By default, the Git Panel is laid out like VS Code's Source Control view. From top to bottom it shows:
+
+- A **Source Control** title bar with buttons to switch between list and tree view, open all changes, and a **More Actions** (`⋯`) menu for pulling, pushing, branches, stashes, tags and worktrees.
+- A **Repositories** section, when more than one repository is open. Click a repository to make it active. To always show it, set `git_panel.always_show_repositories` to `true`.
+- The commit message box, with a button underneath that commits, or syncs or publishes the branch when there is nothing to commit.
+- Your changes, grouped into **Merge Changes**, **Staged Changes** and **Changes**.
+- A collapsible **Source Control Graph** section with the commit history and its branch lanes. Drag its top edge to resize it.
+
+The status bar also shows the current branch, which opens the branch switcher when clicked, and a button to sync with or publish to the remote.
+
+Untracked files are listed under **Changes**. To give them their own **Untracked Changes** group, or to hide them, set `git_panel.untracked_changes` to `separate` or `hidden`.
+
+To use Zed's original layout instead, with **Changes** and **History** tabs, staging checkboxes and the commit message box at the bottom, set:
+
+```json [settings]
+{
+  "git_panel": {
+    "layout": "zed"
+  }
+}
+```
+
 ### Configuration
 
 Open the Settings Editor (`Cmd+,` on macOS, `Ctrl+,` on Linux/Windows) to customize Git behavior. Settings are spread across two pages:
@@ -45,7 +69,7 @@ By default, the Git Panel docks on the left. Go to **Panels > Git Panel** and ch
 
 #### Switching to Tree View
 
-The Git Panel shows a flat list of changed files by default. To see files organized by folder hierarchy instead, toggle **Tree View** in the panel's context menu, or enable it in **Panels > Git Panel**.
+The Git Panel shows a flat list of changed files by default. To see files organized by folder hierarchy instead, click the list/tree button in the panel's title bar (or toggle **Tree View** in the panel's context menu in the `zed` layout), or enable it in **Panels > Git Panel**.
 
 #### Inline Blame
 
@@ -127,6 +151,8 @@ To create a lightweight tag at `HEAD`, use {#action git::CreateTagAtHead} from t
 
 Fetch, push, or pull from your Git repository in Zed via the buttons available on the Git Panel or via the Command Palette by looking at the respective actions: {#action git::Fetch}, {#action git::Push}, and {#action git::Pull}.
 
+In the default layout, these live in the panel's **More Actions** (`⋯`) menu, under **Pull, Push** for variants such as **Pull (Rebase)**, **Push to…** and **Force Push**. The sync button in the status bar runs {#action git::Sync}, which pulls and then pushes.
+
 ### Push Configuration
 
 Zed respects Git's push configuration. When pushing, Zed checks the following in order:
@@ -139,7 +165,7 @@ This matches Git's standard behavior, so if you've configured `pushRemote` or `p
 
 ## Remotes
 
-When your repository has multiple remotes, Zed shows a remote selector in the Git Panel. Click the remote button next to push/pull to choose which remote to use for that operation.
+When your repository has multiple remotes, Zed lets you choose which remote to use for an operation. In the default layout, use **Push to…** or **Fetch From…** in the **More Actions** (`⋯`) menu's **Pull, Push** submenu. In the `zed` layout, click the remote button next to push/pull in the Git Panel.
 
 ## Staging Workflow
 
@@ -153,7 +179,11 @@ Similarly, stage all hunks at the same time with the {#action git::StageAll} ({#
 
 ### Using the Git Panel
 
-From the panel, you can simply type a commit message and hit the commit button, or {#action git::Commit}. This will automatically stage all tracked files (indicated by a `[·]` in the entry's checkbox) and commit them.
+From the panel, you can simply type a commit message and hit the commit button, or {#action git::Commit}. If nothing is staged, this will automatically stage all tracked files and commit them.
+
+Hover over a file to stage it (`+`), unstage it (`−`), discard its changes or open it. Hovering over a group header shows the same actions for the whole group, such as **Stage All Changes** on **Changes** and **Unstage All Changes** on **Staged Changes**. A file that is partly staged appears in both groups. The letter at the end of each row shows the file's status: `M` modified, `A` added, `D` deleted, `R` renamed, `U` untracked and `!` conflicted.
+
+The rest of this section describes the `zed` layout. There, tracked files that will be committed are indicated by a `[·]` in the entry's checkbox.
 
 <!-- Show a set of changes with default staged -->
 
@@ -169,12 +199,16 @@ To open a changed file in the editor without a diff view, right-click on the fil
 
 Zed offers two commit textareas:
 
-1. The first one is available right at the bottom of the Git Panel. Hitting {#kb git::Commit} immediately commits all of your staged changes.
+1. The first one is in the Git Panel: at the top in the default layout, and at the bottom in the `zed` layout. Hitting {#kb git::Commit} immediately commits all of your staged changes. Opening the panel with {#action git_panel::ToggleFocus} puts the cursor in it.
 2. The second is available via the action {#action git::ExpandCommitEditor} or via hitting the {#kb git::ExpandCommitEditor} while focused in the Git Panel commit textarea.
+
+In the default layout, the arrow next to the commit button also offers **Commit & Push** and **Commit & Sync**, which push, or pull and then push, once the commit succeeds. When there is nothing to commit, the button turns into **Sync Changes**, which runs {#action git::Sync}, or **Publish Branch** for a branch without an upstream.
 
 ### Undoing a Commit
 
-As soon as you commit in Zed, in the Git Panel, you'll see a bar right under the commit textarea, which will show the recently submitted commit.
+To undo the last commit in the default layout, open the **More Actions** (`⋯`) menu and choose **Commit > Undo Last Commit**.
+
+In the `zed` layout, as soon as you commit you'll see a bar right under the commit textarea, which will show the recently submitted commit.
 In there, you can use the "Uncommit" button, which performs the `git reset HEADˆ--soft` command.
 
 ### Configuring Commit Line Length
@@ -265,13 +299,13 @@ To stash all your current changes, use the {#action git::StashAll} action. This 
 
 To stash only tracked changes and leave untracked files in place, use the {#action git::StashTracked} action. To stash only staged changes and leave unstaged changes in place, use the {#action git::StashStaged} action; this requires git 2.35 or newer.
 
-The Git Panel's overflow menu offers whichever of these matches the current **Group By** mode: **Stash Tracked** when grouping by Tracked & Untracked, and **Stash Staged** when grouping by Staged & Unstaged. **Stash All** is always available.
+In the default layout, the **Stash** submenu of the Git Panel's **More Actions** (`⋯`) menu offers all three. In the `zed` layout, the panel's overflow menu offers whichever of these matches the current **Group By** mode: **Stash Tracked** when grouping by Tracked & Untracked, and **Stash Staged** when grouping by Staged & Unstaged. **Stash All** is always available.
 
 Each of these actions first prompts for an optional stash name. Confirming with an empty prompt lets git generate its usual `WIP on ...` description.
 
 ### Managing Stashes
 
-Zed provides a stash picker accessible via {#action git::ViewStash} or from the Git Panel's overflow menu. From the stash picker, you can:
+Zed provides a stash picker accessible via {#action git::ViewStash}, from **Stash > View Stash…** in the Git Panel's **More Actions** (`⋯`) menu, or from the overflow menu in the `zed` layout. From the stash picker, you can:
 
 - **View stash list**: Browse all your saved stashes with their descriptions and timestamps
 - **Open diffs**: See exactly what changes are stored in each stash
@@ -299,7 +333,7 @@ To view a stash's contents, select it in the stash picker and press {#kb stash_p
 ## AI Support in Git
 
 Zed currently supports LLM-powered commit message generation.
-You can ask AI to generate a commit message by focusing on the message editor within the Git Panel and either clicking on the pencil icon in the bottom left, or reaching for the {#action git::GenerateCommitMessage}, or through the {#kb git::GenerateCommitMessage} keybinding.
+You can ask AI to generate a commit message by focusing on the message editor within the Git Panel and either clicking on the pencil icon (inside the message box on the right in the default layout, or in the bottom left in the `zed` layout), or reaching for the {#action git::GenerateCommitMessage}, or through the {#kb git::GenerateCommitMessage} keybinding.
 
 > Note that you need to have an LLM provider configured either via your own API keys or through Zed's hosted AI models.
 > Visit [AI Quick Start](./ai/quick-start.md) to learn how to configure AI.
@@ -411,6 +445,7 @@ When viewing files with changes, Zed displays diff hunks that can be expanded or
 | {#action git::ForcePush}                  | {#kb git::ForcePush}                  |
 | {#action git::Pull}                       | {#kb git::Pull}                       |
 | {#action git::PullRebase}                 | {#kb git::PullRebase}                 |
+| {#action git::Sync}                       | {#kb git::Sync}                       |
 | {#action git::Fetch}                      | {#kb git::Fetch}                      |
 | {#action git::Diff}                       | {#kb git::Diff}                       |
 | {#action git::Restore}                    | {#kb git::Restore}                    |

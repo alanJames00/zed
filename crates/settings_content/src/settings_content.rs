@@ -822,7 +822,7 @@ pub struct GitPanelSettingsContent {
 
     /// Which layout the Git panel uses.
     ///
-    /// Default: zed
+    /// Default: vscode
     pub layout: Option<GitPanelLayout>,
 
     /// Where untracked files are listed when using the `vscode` layout.
@@ -876,10 +876,10 @@ pub enum GitPanelCommitEditor {
 #[serde(rename_all = "snake_case")]
 pub enum GitPanelLayout {
     /// Changes and History tabs with the commit editor at the bottom.
-    #[default]
     Zed,
     /// Collapsible "Merge Changes", "Staged Changes" and "Changes" groups
     /// with inline row actions, in the style of VS Code's Source Control view.
+    #[default]
     Vscode,
 }
 

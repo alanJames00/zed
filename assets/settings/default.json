@@ -1166,9 +1166,9 @@
     "commit_editor": "expanded",
     // Which layout the git panel uses.
     //
-    // Choices: zed, vscode
-    // Default: zed
-    "layout": "zed",
+    // Choices: vscode, zed
+    // Default: vscode
+    "layout": "vscode",
     // Where untracked files are listed when using the `vscode` layout.
     //
     // Choices: mixed, separate, hidden
