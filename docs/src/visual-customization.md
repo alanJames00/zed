@@ -600,7 +600,10 @@ See [Terminal settings](./reference/all-settings.md#terminal) for additional non
     "default_width": 360,         // Default width of the git panel.
     "status_style": "icon",       // label_color, icon
     "sort_by": "path",            // path, name
-    "group_by": "status",         // none, status, staging
+    "group_by": "status",         // none, status, staging (zed layout only)
+    "layout": "vscode",           // vscode, zed
+    "untracked_changes": "mixed", // mixed, separate, hidden (vscode layout only)
+    "always_show_repositories": false, // List repositories with only one open (vscode layout only)
     "scrollbar": {
       "show": null                // Show/hide: (auto, system, always, never)
     }

@@ -107,6 +107,8 @@ actions!(
         Pull,
         /// Pulls changes from the remote repository with rebase.
         PullRebase,
+        /// Pulls changes from the remote repository and then pushes local commits.
+        Sync,
         /// Fetches changes from the remote repository.
         Fetch,
         /// Fetches changes from a specific remote.
