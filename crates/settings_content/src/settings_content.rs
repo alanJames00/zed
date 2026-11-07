@@ -819,6 +819,21 @@ pub struct GitPanelSettingsContent {
     ///
     /// Default: expanded
     pub commit_editor: Option<GitPanelCommitEditor>,
+
+    /// Which layout the Git panel uses.
+    ///
+    /// Default: vscode
+    pub layout: Option<GitPanelLayout>,
+
+    /// Where untracked files are listed when using the `vscode` layout.
+    ///
+    /// Default: mixed
+    pub untracked_changes: Option<GitPanelUntrackedChanges>,
+
+    /// Whether the `vscode` layout lists repositories even when only one is open.
+    ///
+    /// Default: false
+    pub always_show_repositories: Option<bool>,
 }
 
 #[derive(
@@ -842,6 +857,55 @@ pub enum GitPanelCommitEditor {
     Expanded,
     /// Hide the commit message editor, leaving only the commit button row.
     Collapsed,
+}
+
+#[derive(
+    Default,
+    Copy,
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPanelLayout {
+    /// Changes and History tabs with the commit editor at the bottom.
+    Zed,
+    /// Collapsible "Merge Changes", "Staged Changes" and "Changes" groups
+    /// with inline row actions, in the style of VS Code's Source Control view.
+    #[default]
+    Vscode,
+}
+
+#[derive(
+    Default,
+    Copy,
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPanelUntrackedChanges {
+    /// List untracked files together with other unstaged changes.
+    #[default]
+    Mixed,
+    /// List untracked files in their own "Untracked Changes" group.
+    Separate,
+    /// Do not list untracked files.
+    Hidden,
 }
 
 #[derive(

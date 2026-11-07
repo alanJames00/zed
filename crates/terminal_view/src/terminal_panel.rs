@@ -13,7 +13,8 @@ use futures::{channel::oneshot, future::join_all};
 use gpui::{
     Action, Anchor, App, AsyncApp, AsyncWindowContext, Context, DragMoveEvent, Entity,
     EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseUpEvent, ParentElement,
-    Pixels, Render, Styled, Subscription, Task, TaskExt, WeakEntity, Window, actions, deferred,
+    Pixels, Render, ScrollHandle, Styled, Subscription, Task, TaskExt, WeakEntity, Window, actions,
+    deferred,
 };
 use itertools::Itertools;
 use project::{Fs, Project};
@@ -23,7 +24,7 @@ use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, T
 use terminal::{Terminal, terminal_settings::TerminalSettings};
 use ui::{
     ButtonLike, Clickable, CommonAnimationExt, ContextMenu, FluentBuilder, ListItem, PopoverMenu,
-    SplitButton, Tab, Toggleable, Tooltip, prelude::*, right_click_menu,
+    SplitButton, Tab, Toggleable, Tooltip, WithScrollbar, prelude::*, right_click_menu,
 };
 use util::{ResultExt, TryFutureExt, defer};
 use workspace::{
@@ -93,6 +94,7 @@ pub struct TerminalPanel {
     active: bool,
     terminal_list_visible: bool,
     terminal_list_width: Pixels,
+    terminal_list_scroll_handle: ScrollHandle,
     _settings_subscription: Subscription,
 }
 
@@ -128,6 +130,7 @@ impl TerminalPanel {
             active: false,
             terminal_list_visible: false,
             terminal_list_width: DEFAULT_TERMINAL_LIST_WIDTH,
+            terminal_list_scroll_handle: ScrollHandle::new(),
             _settings_subscription: settings_subscription,
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
@@ -1498,12 +1501,19 @@ impl TerminalPanel {
             .child(deferred(resize_handle))
             .child(header)
             .child(
-                v_flex()
-                    .id("terminal-list")
+                div()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows),
+                    .w_full()
+                    .child(
+                        v_flex()
+                            .id("terminal-list")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.terminal_list_scroll_handle)
+                            .children(rows),
+                    )
+                    .vertical_scrollbar_for(&self.terminal_list_scroll_handle, window, cx),
             )
             .into_any_element()
     }

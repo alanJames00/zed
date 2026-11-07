@@ -1164,6 +1164,20 @@
     // Choices: expanded, collapsed
     // Default: expanded
     "commit_editor": "expanded",
+    // Which layout the git panel uses.
+    //
+    // Choices: vscode, zed
+    // Default: vscode
+    "layout": "vscode",
+    // Where untracked files are listed when using the `vscode` layout.
+    //
+    // Choices: mixed, separate, hidden
+    // Default: mixed
+    "untracked_changes": "mixed",
+    // Whether the `vscode` layout lists repositories even when only one is open.
+    //
+    // Default: false
+    "always_show_repositories": false,
   },
   "agent": {
     // Whether the inline assistant should use streaming tools, when available

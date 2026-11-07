@@ -5,6 +5,7 @@ use editor::{Editor, actions::DiffClipboardWithSelectionData};
 use workspace::{Toast, notifications::NotificationId};
 
 mod blame_ui;
+mod branch_indicator;
 pub mod clone;
 
 use git::{
@@ -61,6 +62,7 @@ pub mod text_diff_view;
 pub mod unstaged_diff;
 
 pub use blame_ui::GitBlameStatus;
+pub use branch_indicator::GitBranchIndicator;
 pub use conflict_view::MergeConflictIndicator;
 
 pub fn init(cx: &mut App) {
@@ -218,6 +220,14 @@ pub fn init(cx: &mut App) {
                 };
                 panel.update(cx, |panel, cx| {
                     panel.push(false, false, window, cx);
+                });
+            });
+            workspace.register_action(|workspace, _: &git::Sync, window, cx| {
+                let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
+                    return;
+                };
+                panel.update(cx, |panel, cx| {
+                    panel.sync(window, cx);
                 });
             });
             workspace.register_action(|workspace, _: &git::PushTo, window, cx| {
