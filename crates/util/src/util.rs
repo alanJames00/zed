@@ -236,6 +236,19 @@ Error: Running Zed as root or via sudo is unsupported.
     }
 }
 
+/// Forces a backtrace to be printed on panic.
+pub fn force_backtrace_on_panic() {
+    let old_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+        old_hook(info);
+        // Prevents the macOS crash dialog from popping up.
+        if cfg!(target_os = "macos") {
+            std::process::exit(1);
+        }
+    }));
+}
+
 /// Raises the soft limit on open file descriptors without changing the hard limit.
 ///
 /// Call during startup, before spawning children that will inherit the limit.

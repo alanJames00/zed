@@ -78,8 +78,6 @@ anyhow.workspace = true
 askpass.workspace = true
 assets.workspace = true
 audio.workspace = true
-auto_update.workspace = true
-auto_update_ui.workspace = true
 breadcrumbs.workspace = true
 call.workspace = true
 call_hierarchy.workspace = true
@@ -97,7 +95,6 @@ component_preview.workspace = true
 copilot.workspace = true
 copilot_chat.workspace = true
 copilot_ui.workspace = true
-crashes.workspace = true
 dap_adapters.workspace = true
 db.workspace = true
 debug_adapter_extension.workspace = true
@@ -112,7 +109,6 @@ extension.workspace = true
 extension_host.workspace = true
 extensions_ui.workspace = true
 feature_flags.workspace = true
-feedback.workspace = true
 file_finder.workspace = true
 fs.workspace = true
 futures.workspace = true
@@ -129,12 +125,10 @@ gpui_platform = { workspace = true, features = [
     "x11",
 ] }
 gpui_tokio.workspace = true
-hang_telemetry.workspace = true
 image = { workspace = true, optional = true }
 itertools.workspace = true
 rayon.workspace = true
 semver.workspace = true
-system_specs.workspace = true
 tabular_data_preview.workspace = true
 tempfile = { workspace = true, optional = true }
 
@@ -142,7 +136,6 @@ edit_prediction.workspace = true
 edit_prediction_ui.workspace = true
 http_client.workspace = true
 image_viewer.workspace = true
-input_latency_ui.workspace = true
 inspector_ui.workspace = true
 install_cli.workspace = true
 journal.workspace = true
@@ -179,12 +172,10 @@ project.workspace = true
 project_panel.workspace = true
 project_symbols.workspace = true
 prompt_store.workspace = true
-proto.workspace = true
 recent_projects.workspace = true
 release_channel.workspace = true
 remote.workspace = true
 repl.workspace = true
-reqwest = { workspace = true, features = ["multipart"] }
 reqwest_client.workspace = true
 rope.workspace = true
 sandbox.workspace = true
@@ -201,18 +192,15 @@ smol.workspace = true
 snippet_provider.workspace = true
 snippets_ui.workspace = true
 svg_preview.workspace = true
-sysinfo.workspace = true
 tab_switcher.workspace = true
 tasks_ui.workspace = true
 telemetry.workspace = true
-telemetry_events.workspace = true
 terminal_view.workspace = true
 theme.workspace = true
 theme_extension.workspace = true
 theme_selector.workspace = true
 theme_settings.workspace = true
 time.workspace = true
-time_format.workspace = true
 title_bar.workspace = true
 toolchain_selector.workspace = true
 tracing.workspace = true

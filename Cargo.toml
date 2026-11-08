@@ -16,9 +16,6 @@ members = [
     "crates/askpass",
     "crates/assets",
     "crates/audio",
-    "crates/auto_update",
-    "crates/auto_update_helper",
-    "crates/auto_update_ui",
     "crates/aws_http_client",
     "crates/bedrock",
     "crates/bench_metrics",
@@ -45,7 +42,6 @@ members = [
     "crates/context_server",
     "crates/copilot",
     "crates/copilot_chat",
-    "crates/crashes",
     "crates/credentials_provider",
     "crates/dap",
     "crates/dap_adapters",
@@ -79,7 +75,6 @@ members = [
     "crates/extensions_ui",
     "crates/feature_flags",
     "crates/feature_flags_macros",
-    "crates/feedback",
     "crates/file_content",
     "crates/file_finder",
     "crates/file_icons",
@@ -108,14 +103,12 @@ members = [
     "crates/gpui_wgpu",
     "crates/gpui_windows",
     "crates/grammars",
-    "crates/hang_telemetry",
     "crates/html_to_markdown",
     "crates/http_client",
     "crates/http_client_tls",
     "crates/http_proxy",
     "crates/icons",
     "crates/image_viewer",
-    "crates/input_latency_ui",
     "crates/inspector_ui",
     "crates/install_cli",
     "crates/journal",
@@ -208,7 +201,6 @@ members = [
     "crates/sum_tree",
     "crates/svg_preview",
     "crates/syntax_theme",
-    "crates/system_specs",
     "crates/tab_switcher",
     "crates/tabular_data_preview",
     "crates/task",
@@ -298,8 +290,6 @@ askpass = { path = "crates/askpass" }
 assets = { path = "crates/assets" }
 audio = { path = "crates/audio" }
 bench_metrics = { path = "crates/bench_metrics" }
-auto_update = { path = "crates/auto_update" }
-auto_update_ui = { path = "crates/auto_update_ui" }
 aws_http_client = { path = "crates/aws_http_client" }
 bedrock = { path = "crates/bedrock" }
 breadcrumbs = { path = "crates/breadcrumbs" }
@@ -326,7 +316,6 @@ context_server = { path = "crates/context_server" }
 copilot = { path = "crates/copilot" }
 copilot_chat = { path = "crates/copilot_chat" }
 copilot_ui = { path = "crates/copilot_ui" }
-crashes = { path = "crates/crashes" }
 credentials_provider = { path = "crates/credentials_provider" }
 dap = { path = "crates/dap" }
 dap_adapters = { path = "crates/dap_adapters" }
@@ -354,7 +343,6 @@ extension_suggest = { path = "crates/extension_suggest" }
 extensions_ui = { path = "crates/extensions_ui" }
 feature_flags = { path = "crates/feature_flags" }
 feature_flags_macros = { path = "crates/feature_flags_macros" }
-feedback = { path = "crates/feedback" }
 file_content = { path = "crates/file_content" }
 file_finder = { path = "crates/file_finder" }
 file_icons = { path = "crates/file_icons" }
@@ -382,14 +370,12 @@ gpui_web = { path = "crates/gpui_web", default-features = false }
 gpui_wgpu = { path = "crates/gpui_wgpu" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
 grammars = { path = "crates/grammars" }
-hang_telemetry = { path = "crates/hang_telemetry" }
 html_to_markdown = { path = "crates/html_to_markdown" }
 http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }
 image_viewer = { path = "crates/image_viewer" }
-input_latency_ui = { path = "crates/input_latency_ui" }
 inspector_ui = { path = "crates/inspector_ui" }
 install_cli = { path = "crates/install_cli" }
 journal = { path = "crates/journal" }
@@ -481,7 +467,6 @@ streaming_diff = { path = "crates/streaming_diff" }
 sum_tree = { path = "crates/sum_tree" }
 svg_preview = { path = "crates/svg_preview" }
 syntax_theme = { path = "crates/syntax_theme" }
-system_specs = { path = "crates/system_specs" }
 tab_switcher = { path = "crates/tab_switcher" }
 tabular_data_preview = { path = "crates/tabular_data_preview"}
 task = { path = "crates/task" }
@@ -696,7 +681,6 @@ markup5ever_rcdom = "0.39"
 mdbook = { version = "=0.4.40", default-features = false, features = ["search"] }
 merman = { version = "=0.8.0-alpha.5", default-features = false }
 mime = "0.3.17"
-minidumper = "0.11"
 moka = { version = "0.12.10", features = ["sync"] }
 nanoid = "0.4"
 nbformat = "1.2.0"
@@ -1051,8 +1035,6 @@ webrtc-sys = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev 
 # Avoid panicking when a failed EGL call reports EGL_SUCCESS.
 # https://github.com/timothee-haudebourg/khronos-egl/pull/37
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
-# Includes https://github.com/rust-minidump/minidump-writer/pull/249 to fix crashes on `cmd-q` (https://github.com/zed-industries/zed/issues/57664)
-crash-context = { git = "https://github.com/rust-minidump/minidump-writer", rev = "911b04e09b79b736cc15cbe712e83e2d3f348bb9" }
 
 # corgi runs build.rs/proc-macros in a sandbox with no write access outside the
 # action's own OUT_DIR. Upstream `scratch` bakes its build-time OUT_DIR in via
@@ -1108,7 +1090,6 @@ wasmtime = { opt-level = 3 }
 cranelift-codegen = { opt-level = 3 }
 wasmtime-environ = { opt-level = 3 }
 wasmtime-internal-cranelift = { opt-level = 3 }
-minidumper = { opt-level = 3 }
 serde_json = { opt-level = 3 }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 activity_indicator = { codegen-units = 1 }

@@ -72,7 +72,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action("About Zed", zed_actions::About),
-                MenuItem::action("Check for Updates", auto_update::Check),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu::new("Settings").items([
                     MenuItem::action("Open Settings", zed_actions::OpenSettings),
@@ -304,17 +303,8 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             name: "Help".into(),
             disabled: false,
             items: vec![
-                MenuItem::action(
-                    "View Release Notes Locally",
-                    auto_update_ui::ViewReleaseNotesLocally,
-                ),
-                MenuItem::action("View Telemetry", zed_actions::OpenTelemetryLog),
                 MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
                 MenuItem::action("Show Welcome", onboarding::ShowWelcome),
-                MenuItem::separator(),
-                MenuItem::action("File Bug Report...", zed_actions::feedback::FileBugReport),
-                MenuItem::action("Request Feature...", zed_actions::feedback::RequestFeature),
-                MenuItem::action("Email Us...", zed_actions::feedback::EmailZed),
                 MenuItem::separator(),
                 MenuItem::action(
                     "Documentation",
@@ -322,7 +312,12 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                         url: "https://zed.dev/docs".into(),
                     },
                 ),
-                MenuItem::action("Zed Repository", feedback::OpenZedRepo),
+                MenuItem::action(
+                    "Zed Repository",
+                    super::OpenBrowser {
+                        url: "https://github.com/zed-industries/zed".into(),
+                    },
+                ),
                 MenuItem::action(
                     "Zed Twitter",
                     super::OpenBrowser {

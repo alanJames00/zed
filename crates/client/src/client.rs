@@ -57,7 +57,6 @@ use util::{ConnectionResult, ResultExt};
 
 pub use llm_token::*;
 pub use rpc::*;
-pub use telemetry_events::Event;
 pub use user::*;
 
 static ZED_SERVER_URL: LazyLock<Option<String>> =
@@ -555,15 +554,17 @@ impl settings::Settings for TelemetrySettings {
 }
 
 impl Client {
+    // The clock was only used for telemetry timestamps. It stays in the signature so the many
+    // callers don't need to change, which keeps upstream merges simple.
     pub fn new(
-        clock: Arc<dyn SystemClock>,
+        _clock: Arc<dyn SystemClock>,
         http: Arc<HttpClientWithUrl>,
         cx: &mut App,
     ) -> Arc<Self> {
         Arc::new(Self {
             id: AtomicU64::new(0),
             peer: Peer::new(0),
-            telemetry: Telemetry::new(clock, http.clone(), cx),
+            telemetry: Telemetry::new(cx),
             cloud_client: Arc::new(CloudApiClient::new(http.clone())),
             http,
             credentials_provider: ClientCredentialsProvider::new(cx),
@@ -650,6 +651,11 @@ impl Client {
 
     pub fn global(cx: &App) -> Arc<Self> {
         cx.global::<GlobalClient>().0.clone()
+    }
+
+    pub fn try_global(cx: &App) -> Option<Arc<Self>> {
+        cx.try_global::<GlobalClient>()
+            .map(|global_client| global_client.0.clone())
     }
     pub fn set_global(client: Arc<Client>, cx: &mut App) {
         cx.set_global(GlobalClient(client))

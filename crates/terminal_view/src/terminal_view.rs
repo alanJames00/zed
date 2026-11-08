@@ -1542,7 +1542,6 @@ impl Render for TerminalView {
                             .child(TerminalElement::new(
                                 terminal_handle,
                                 terminal_view_handle,
-                                self.workspace.clone(),
                                 self.focus_handle.clone(),
                                 focused,
                                 self.should_show_cursor(focused, cx),
