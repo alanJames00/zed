@@ -238,7 +238,7 @@ impl StatusBar {
         let has_notifications = sidebar.has_notifications;
         let indicator_border = cx.theme().colors().status_bar_background;
 
-        let toggle = sidebar_side_context_menu("sidebar-status-toggle-menu", cx)
+        let toggle = sidebar_side_context_menu("sidebar-status-toggle-menu")
             .anchor(if on_right {
                 Anchor::BottomRight
             } else {

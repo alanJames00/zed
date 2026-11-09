@@ -1,7 +1,6 @@
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 
-mod llm_token;
 mod proxy;
 pub mod telemetry;
 pub mod user;
@@ -14,10 +13,8 @@ use async_tungstenite::tungstenite::{
     http::{HeaderValue, Request, StatusCode},
 };
 use clock::SystemClock;
-use cloud_api_client::LlmApiToken;
+use cloud_api_client::CloudApiClient;
 use cloud_api_client::websocket_protocol::MessageToClient;
-use cloud_api_client::{ClientApiError, CloudApiClient};
-use cloud_api_types::OrganizationId;
 use credentials_provider::CredentialsProvider;
 use feature_flags::FeatureFlagAppExt as _;
 use futures::{
@@ -55,7 +52,6 @@ use tokio::net::TcpStream;
 use url::Url;
 use util::{ConnectionResult, ResultExt};
 
-pub use llm_token::*;
 pub use rpc::*;
 pub use user::*;
 
@@ -1609,79 +1605,6 @@ impl Client {
             user_id: response.user_id,
             access_token: response.access_token,
         })
-    }
-
-    pub async fn cached_llm_token(
-        &self,
-        llm_token: &LlmApiToken,
-        organization_id: OrganizationId,
-    ) -> Result<String, ClientApiError> {
-        let system_id = self.telemetry().system_id().map(|x| x.to_string());
-        let cloud_client = self.cloud_client();
-        let result = llm_token
-            .cached(&cloud_client, system_id, organization_id)
-            .await;
-        if let Err(ClientApiError::Unauthorized) = result {
-            self.request_sign_out();
-        }
-        result
-    }
-
-    /// Sends an authenticated request to the Zed LLM service, retrying once
-    /// with a refreshed token if the server signals that the cached LLM
-    /// token is expired or otherwise rejected. Returns the raw response so
-    /// callers can inspect headers and stream the body.
-    pub async fn authenticated_llm_request(
-        &self,
-        llm_token: &LlmApiToken,
-        organization_id: OrganizationId,
-        build_request: impl Fn(&str) -> Result<http_client::Request<http_client::AsyncBody>>,
-    ) -> Result<http_client::Response<http_client::AsyncBody>> {
-        let http_client = self.http_client();
-        let token = self
-            .cached_llm_token(llm_token, organization_id.clone())
-            .await?;
-        let response = http_client.send(build_request(&token)?).await?;
-        if !response.needs_llm_token_refresh()
-            && response.status() != http_client::http::StatusCode::UNAUTHORIZED
-        {
-            return Ok(response);
-        }
-        log::info!("LLM token rejected; refreshing and retrying request");
-        let token = self.refresh_llm_token(llm_token, organization_id).await?;
-        http_client.send(build_request(&token)?).await
-    }
-
-    pub async fn refresh_llm_token(
-        &self,
-        llm_token: &LlmApiToken,
-        organization_id: OrganizationId,
-    ) -> Result<String, ClientApiError> {
-        let system_id = self.telemetry().system_id().map(|x| x.to_string());
-        let cloud_client = self.cloud_client();
-        let result = llm_token
-            .refresh(&cloud_client, system_id, organization_id)
-            .await;
-        if let Err(ClientApiError::Unauthorized) = result {
-            self.request_sign_out();
-        }
-        result
-    }
-
-    pub async fn clear_and_refresh_llm_token(
-        &self,
-        llm_token: &LlmApiToken,
-        organization_id: OrganizationId,
-    ) -> Result<String, ClientApiError> {
-        let system_id = self.telemetry().system_id().map(|x| x.to_string());
-        let cloud_client = self.cloud_client();
-        let result = llm_token
-            .clear_and_refresh(&cloud_client, system_id, organization_id)
-            .await;
-        if let Err(ClientApiError::Unauthorized) = result {
-            self.request_sign_out();
-        }
-        result
     }
 
     pub async fn sign_out(self: &Arc<Self>, cx: &AsyncApp) {

@@ -90,9 +90,6 @@ impl DiffMultibuffer {
                 cx,
             );
             configure_editor(&mut diff_display_editor, cx);
-            diff_display_editor.rhs_editor().update(cx, |editor, cx| {
-                editor.set_show_diff_review_button(true, cx);
-            });
             diff_display_editor
         });
         let editor_subscription = cx.subscribe_in(&editor, window, Self::handle_editor_event);
