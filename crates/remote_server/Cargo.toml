@@ -72,7 +72,6 @@ watch.workspace = true
 worktree.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
-uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

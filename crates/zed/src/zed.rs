@@ -6142,7 +6142,6 @@ mod tests {
                 "menu",
                 "multi_workspace",
                 "new_process_modal",
-                "notebook",
                 "onboarding",
                 "outline",
                 "outline_panel",
@@ -6154,7 +6153,6 @@ mod tests {
                 "projects",
                 "recent_projects",
                 "remote_debug",
-                "repl",
                 "search",
                 "settings_editor",
                 "settings_profile_selector",
@@ -6393,8 +6391,6 @@ mod tests {
                 cx,
             );
 
-            repl::init(app_state.fs.clone(), cx);
-            repl::notebook::init(cx);
             tasks_ui::init(cx);
             project::debugger::breakpoint_store::BreakpointStore::init(
                 &app_state.client.clone().into(),
