@@ -1,5 +1,3 @@
-mod audio_input_output_setup;
-mod audio_test_window;
 mod external_agents_page;
 mod feature_flags;
 mod llm_providers_page;
@@ -9,10 +7,6 @@ mod skill_creator;
 mod skills_setup;
 mod tool_permissions_setup;
 
-pub(crate) use audio_input_output_setup::{
-    render_input_audio_device_dropdown, render_output_audio_device_dropdown,
-};
-pub(crate) use audio_test_window::open_audio_test_window;
 pub(crate) use external_agents_page::{
     CustomAgentForm, render_add_agent_popover, render_external_agents_page,
 };

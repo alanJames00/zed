@@ -7,10 +7,8 @@
 **/target
 zed.xcworkspace
 .DS_Store
-compose.yml
 plugins/bin
 script/node_modules
 styles/node_modules
-crates/collab/static/styles.css
 vendor/bin
 assets/themes/
