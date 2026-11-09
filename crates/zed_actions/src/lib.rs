@@ -785,13 +785,6 @@ pub mod outline {
 }
 
 actions!(
-    zed_predict_onboarding,
-    [
-        /// Opens the Zed Predict onboarding modal.
-        OpenZedPredictOnboarding
-    ]
-);
-actions!(
     git_onboarding,
     [
         /// Opens the git integration onboarding modal.

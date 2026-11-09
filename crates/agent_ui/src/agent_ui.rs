@@ -53,10 +53,7 @@ use gpui::{
     Action, App, Context, Entity, ImageSource, ReadGlobal as _, Resource, SharedString, SharedUri,
     TaskExt, Window, actions,
 };
-use language::{
-    LanguageRegistry,
-    language_settings::{AllLanguageSettings, EditPredictionProvider},
-};
+use language::LanguageRegistry;
 use language_model::{
     LanguageModel, LanguageModelId, LanguageModelProviderId, LanguageModelRegistry,
 };
@@ -887,10 +884,6 @@ fn update_command_palette_filter(cx: &mut App) {
     let disable_ai = DisableAiSettings::get_global(cx).disable_ai;
     let agent_enabled = AgentSettings::get_global(cx).enabled;
 
-    let edit_prediction_provider = AllLanguageSettings::get_global(cx)
-        .edit_predictions
-        .provider;
-
     CommandPaletteFilter::update_global(cx, |filter, _| {
         use editor::actions::{
             AcceptEditPrediction, AcceptNextLineEditPrediction, AcceptNextWordEditPrediction,
@@ -905,6 +898,9 @@ fn update_command_palette_filter(cx: &mut App) {
             TypeId::of::<PreviousEditPrediction>(),
             TypeId::of::<ToggleEditPrediction>(),
         ];
+        // No edit prediction provider exists in this build, so these editor actions never do
+        // anything regardless of settings.
+        filter.hide_action_types(&edit_prediction_actions);
 
         let manage_skills_action = [TypeId::of::<zed_actions::assistant::ManageSkills>()];
         let skill_creator_actions = [
@@ -916,12 +912,6 @@ fn update_command_palette_filter(cx: &mut App) {
             filter.hide_namespace("agent");
             filter.hide_namespace("agents");
             filter.hide_namespace("assistant");
-            filter.hide_namespace("copilot");
-            filter.hide_namespace("zed_predict_onboarding");
-            filter.hide_namespace("edit_prediction");
-
-            filter.hide_action_types(&edit_prediction_actions);
-            filter.hide_action_types(&[TypeId::of::<zed_actions::OpenZedPredictOnboarding>()]);
         } else {
             if agent_enabled {
                 filter.show_namespace("agent");
@@ -932,31 +922,6 @@ fn update_command_palette_filter(cx: &mut App) {
                 filter.hide_namespace("agents");
                 filter.hide_namespace("assistant");
             }
-
-            match edit_prediction_provider {
-                EditPredictionProvider::None => {
-                    filter.hide_namespace("edit_prediction");
-                    filter.hide_namespace("copilot");
-                    filter.hide_action_types(&edit_prediction_actions);
-                }
-                EditPredictionProvider::Copilot => {
-                    filter.show_namespace("edit_prediction");
-                    filter.show_namespace("copilot");
-                    filter.show_action_types(edit_prediction_actions.iter());
-                }
-                EditPredictionProvider::Zed
-                | EditPredictionProvider::Codestral
-                | EditPredictionProvider::Ollama
-                | EditPredictionProvider::OpenAiCompatibleApi
-                | EditPredictionProvider::Mercury => {
-                    filter.show_namespace("edit_prediction");
-                    filter.hide_namespace("copilot");
-                    filter.show_action_types(edit_prediction_actions.iter());
-                }
-            }
-
-            filter.show_namespace("zed_predict_onboarding");
-            filter.show_action_types(&[TypeId::of::<zed_actions::OpenZedPredictOnboarding>()]);
 
             filter.show_namespace("multi_workspace");
         }
@@ -1048,6 +1013,7 @@ mod tests {
     use db::kvp::KeyValueStore;
     use editor::actions::AcceptEditPrediction;
     use gpui::{BorrowAppContext, TestAppContext, px};
+    use language::language_settings::{AllLanguageSettings, EditPredictionProvider};
     use project::DisableAiSettings;
     use settings::{
         DockPosition, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, Settings, SettingsStore,
@@ -1187,8 +1153,8 @@ mod tests {
             );
         });
 
-        // Test EditPredictionProvider
-        // Enable EditPredictionProvider::Copilot
+        // Edit prediction actions stay hidden even when a provider is configured, because
+        // no provider exists in this build.
         cx.update(|cx| {
             cx.update_global::<SettingsStore, _>(|store, cx| {
                 store.update_user_settings(cx, |s| {
@@ -1205,30 +1171,8 @@ mod tests {
         cx.update(|cx| {
             let filter = CommandPaletteFilter::try_global(cx).unwrap();
             assert!(
-                !filter.is_hidden(&AcceptEditPrediction),
-                "EditPrediction should be visible when provider is Copilot"
-            );
-        });
-
-        // Disable EditPredictionProvider (None)
-        cx.update(|cx| {
-            cx.update_global::<SettingsStore, _>(|store, cx| {
-                store.update_user_settings(cx, |s| {
-                    s.project
-                        .all_languages
-                        .edit_predictions
-                        .get_or_insert(Default::default())
-                        .provider = Some(EditPredictionProvider::None);
-                });
-            });
-            update_command_palette_filter(cx);
-        });
-
-        cx.update(|cx| {
-            let filter = CommandPaletteFilter::try_global(cx).unwrap();
-            assert!(
                 filter.is_hidden(&AcceptEditPrediction),
-                "EditPrediction should be hidden when provider is None"
+                "EditPrediction should be hidden even when a provider is configured"
             );
         });
 

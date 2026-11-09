@@ -1,5 +1,4 @@
 mod app_menus;
-pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
 mod migrate;
@@ -559,22 +558,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             show_software_emulation_warning_if_needed(specs, window, cx);
         }
 
-        let edit_prediction_menu_handle = PopoverMenuHandle::default();
-        let edit_prediction_ui = cx.new(|cx| {
-            edit_prediction_ui::EditPredictionButton::new(
-                app_state.fs.clone(),
-                app_state.user_store.clone(),
-                edit_prediction_menu_handle.clone(),
-                workspace.project().clone(),
-                cx,
-            )
-        });
-        workspace.register_action({
-            move |_, _: &edit_prediction_ui::ToggleMenu, window, cx| {
-                edit_prediction_menu_handle.toggle(window, cx);
-            }
-        });
-
         let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
         let diagnostic_summary =
             cx.new(|cx| diagnostics::items::DiagnosticIndicator::new(workspace, cx));
@@ -618,7 +601,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(git_blame_status, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
-            status_bar.add_right_item(edit_prediction_ui, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
             status_bar.add_right_item(active_toolchain_language, window, cx);
@@ -2314,14 +2296,7 @@ pub fn load_default_keymap(cx: &mut App) {
 /// that lower-precedence editor defaults (e.g. `editor::NewlineBelow` for
 /// `ctrl-enter`) can fire instead of being shadowed by an action whose handler
 /// silently no-ops.
-const AI_ACTION_NAMESPACES: &[&str] = &[
-    "acp::",
-    "agent::",
-    "assistant::",
-    "edit_prediction::",
-    "inline_assistant::",
-    "zeta::",
-];
+const AI_ACTION_NAMESPACES: &[&str] = &["acp::", "agent::", "assistant::", "inline_assistant::"];
 
 fn is_ai_keybinding(binding: &KeyBinding) -> bool {
     let name = binding.action().name();
@@ -6151,16 +6126,12 @@ mod tests {
                 "command_palette",
                 "console",
                 "context_server",
-                "copilot",
-                "copilot_edit_predictions",
                 "debug_panel",
                 "debugger",
                 "dev",
                 "diagnostics",
-                "edit_prediction",
                 "editor",
                 "encoding_selector",
-                "feedback",
                 "file_finder",
                 "git",
                 "git_graph",
@@ -6223,8 +6194,6 @@ mod tests {
                 "worktree_picker",
                 "zed",
                 "zed_actions",
-                "zed_predict_onboarding",
-                "zeta",
             ];
             assert_eq!(
                 all_namespaces,
@@ -6416,13 +6385,6 @@ mod tests {
             project_panel::init(cx);
             outline_panel::init(cx);
             terminal_view::init(cx);
-            let credentials_provider = zed_credentials_provider::global(cx);
-            copilot_chat::init(
-                app_state.client.http_client(),
-                credentials_provider,
-                copilot_chat::CopilotChatConfiguration::default(),
-                cx,
-            );
             image_viewer::init(cx);
             language_model::init(cx);
             client::RefreshLlmTokenListener::register(

@@ -31,7 +31,6 @@ members = [
     "crates/cloud_api_client",
     "crates/cloud_api_types",
     "crates/cloud_llm_client",
-    "crates/codestral",
     "crates/collab",
     "crates/collab_ui",
     "crates/collections",
@@ -40,8 +39,6 @@ members = [
     "crates/component",
     "crates/component_preview",
     "crates/context_server",
-    "crates/copilot",
-    "crates/copilot_chat",
     "crates/credentials_provider",
     "crates/dap",
     "crates/dap_adapters",
@@ -53,12 +50,7 @@ members = [
     "crates/dev_container",
     "crates/diagnostics",
     "crates/docs_preprocessor",
-    "crates/edit_prediction",
-    "crates/edit_prediction_cli",
-    "crates/edit_prediction_context",
-    "crates/edit_prediction_metrics",
     "crates/edit_prediction_types",
-    "crates/edit_prediction_ui",
     "crates/editor",
     "crates/editor_benchmarks",
     "crates/encoding_selector",
@@ -303,7 +295,6 @@ clock = { path = "crates/clock" }
 cloud_api_client = { path = "crates/cloud_api_client" }
 cloud_api_types = { path = "crates/cloud_api_types" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
-codestral = { path = "crates/codestral" }
 collab = { path = "crates/collab" }
 collab_ui = { path = "crates/collab_ui" }
 collections = { path = "crates/collections", version = "0.1.0" }
@@ -313,9 +304,6 @@ compliance = { path = "tooling/compliance" }
 component = { path = "crates/component" }
 component_preview = { path = "crates/component_preview" }
 context_server = { path = "crates/context_server" }
-copilot = { path = "crates/copilot" }
-copilot_chat = { path = "crates/copilot_chat" }
-copilot_ui = { path = "crates/copilot_ui" }
 credentials_provider = { path = "crates/credentials_provider" }
 dap = { path = "crates/dap" }
 dap_adapters = { path = "crates/dap_adapters" }
@@ -327,11 +315,7 @@ deepseek = { path = "crates/deepseek" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
 dev_container = { path = "crates/dev_container" }
 diagnostics = { path = "crates/diagnostics" }
-edit_prediction = { path = "crates/edit_prediction" }
-edit_prediction_context = { path = "crates/edit_prediction_context" }
-edit_prediction_metrics = { path = "crates/edit_prediction_metrics", features = ["tree-sitter"] }
 edit_prediction_types = { path = "crates/edit_prediction_types" }
-edit_prediction_ui = { path = "crates/edit_prediction_ui" }
 editor = { path = "crates/editor" }
 encoding_selector = { path = "crates/encoding_selector" }
 env_var = { path = "crates/env_var" }
@@ -1098,7 +1082,6 @@ breadcrumbs = { codegen-units = 1 }
 collections = { codegen-units = 1 }
 command_palette = { codegen-units = 1 }
 command_palette_hooks = { codegen-units = 1 }
-edit_prediction_ui = { codegen-units = 1 }
 feature_flags = { codegen-units = 1 }
 file_content = { codegen-units = 1 }
 file_icons = { codegen-units = 1 }
