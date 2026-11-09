@@ -124,10 +124,6 @@ struct Args {
     #[cfg(target_os = "windows")]
     #[arg(long, value_name = "USER@DISTRO")]
     wsl: Option<String>,
-    /// Not supported in Zed CLI, only supported on Zed binary
-    /// Will attempt to give the correct command to run
-    #[arg(long)]
-    system_specs: bool,
     /// Open the project in a dev container.
     ///
     /// Automatically triggers "Reopen in Dev Container" if a `.devcontainer/`
@@ -546,16 +542,6 @@ fn run() -> Result<()> {
     if args.version {
         println!("{}", app.zed_version_string());
         return Ok(());
-    }
-
-    if args.system_specs {
-        let path = app.path();
-        let msg = [
-            "The `--system-specs` argument is not supported in the Zed CLI, only on Zed binary.",
-            "To retrieve the system specs on the command line, run the following command:",
-            &format!("{} --system-specs", path.display()),
-        ];
-        anyhow::bail!(msg.join("\n"));
     }
 
     #[cfg(all(

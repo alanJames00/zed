@@ -1,7 +1,6 @@
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 
-mod llm_token;
 mod proxy;
 pub mod telemetry;
 pub mod user;
@@ -14,10 +13,8 @@ use async_tungstenite::tungstenite::{
     http::{HeaderValue, Request, StatusCode},
 };
 use clock::SystemClock;
-use cloud_api_client::LlmApiToken;
+use cloud_api_client::CloudApiClient;
 use cloud_api_client::websocket_protocol::MessageToClient;
-use cloud_api_client::{ClientApiError, CloudApiClient};
-use cloud_api_types::OrganizationId;
 use credentials_provider::CredentialsProvider;
 use feature_flags::FeatureFlagAppExt as _;
 use futures::{
@@ -55,9 +52,7 @@ use tokio::net::TcpStream;
 use url::Url;
 use util::{ConnectionResult, ResultExt};
 
-pub use llm_token::*;
 pub use rpc::*;
-pub use telemetry_events::Event;
 pub use user::*;
 
 static ZED_SERVER_URL: LazyLock<Option<String>> =
@@ -555,15 +550,17 @@ impl settings::Settings for TelemetrySettings {
 }
 
 impl Client {
+    // The clock was only used for telemetry timestamps. It stays in the signature so the many
+    // callers don't need to change, which keeps upstream merges simple.
     pub fn new(
-        clock: Arc<dyn SystemClock>,
+        _clock: Arc<dyn SystemClock>,
         http: Arc<HttpClientWithUrl>,
         cx: &mut App,
     ) -> Arc<Self> {
         Arc::new(Self {
             id: AtomicU64::new(0),
             peer: Peer::new(0),
-            telemetry: Telemetry::new(clock, http.clone(), cx),
+            telemetry: Telemetry::new(cx),
             cloud_client: Arc::new(CloudApiClient::new(http.clone())),
             http,
             credentials_provider: ClientCredentialsProvider::new(cx),
@@ -650,6 +647,11 @@ impl Client {
 
     pub fn global(cx: &App) -> Arc<Self> {
         cx.global::<GlobalClient>().0.clone()
+    }
+
+    pub fn try_global(cx: &App) -> Option<Arc<Self>> {
+        cx.try_global::<GlobalClient>()
+            .map(|global_client| global_client.0.clone())
     }
     pub fn set_global(client: Arc<Client>, cx: &mut App) {
         cx.set_global(GlobalClient(client))
@@ -1605,79 +1607,6 @@ impl Client {
         })
     }
 
-    pub async fn cached_llm_token(
-        &self,
-        llm_token: &LlmApiToken,
-        organization_id: OrganizationId,
-    ) -> Result<String, ClientApiError> {
-        let system_id = self.telemetry().system_id().map(|x| x.to_string());
-        let cloud_client = self.cloud_client();
-        let result = llm_token
-            .cached(&cloud_client, system_id, organization_id)
-            .await;
-        if let Err(ClientApiError::Unauthorized) = result {
-            self.request_sign_out();
-        }
-        result
-    }
-
-    /// Sends an authenticated request to the Zed LLM service, retrying once
-    /// with a refreshed token if the server signals that the cached LLM
-    /// token is expired or otherwise rejected. Returns the raw response so
-    /// callers can inspect headers and stream the body.
-    pub async fn authenticated_llm_request(
-        &self,
-        llm_token: &LlmApiToken,
-        organization_id: OrganizationId,
-        build_request: impl Fn(&str) -> Result<http_client::Request<http_client::AsyncBody>>,
-    ) -> Result<http_client::Response<http_client::AsyncBody>> {
-        let http_client = self.http_client();
-        let token = self
-            .cached_llm_token(llm_token, organization_id.clone())
-            .await?;
-        let response = http_client.send(build_request(&token)?).await?;
-        if !response.needs_llm_token_refresh()
-            && response.status() != http_client::http::StatusCode::UNAUTHORIZED
-        {
-            return Ok(response);
-        }
-        log::info!("LLM token rejected; refreshing and retrying request");
-        let token = self.refresh_llm_token(llm_token, organization_id).await?;
-        http_client.send(build_request(&token)?).await
-    }
-
-    pub async fn refresh_llm_token(
-        &self,
-        llm_token: &LlmApiToken,
-        organization_id: OrganizationId,
-    ) -> Result<String, ClientApiError> {
-        let system_id = self.telemetry().system_id().map(|x| x.to_string());
-        let cloud_client = self.cloud_client();
-        let result = llm_token
-            .refresh(&cloud_client, system_id, organization_id)
-            .await;
-        if let Err(ClientApiError::Unauthorized) = result {
-            self.request_sign_out();
-        }
-        result
-    }
-
-    pub async fn clear_and_refresh_llm_token(
-        &self,
-        llm_token: &LlmApiToken,
-        organization_id: OrganizationId,
-    ) -> Result<String, ClientApiError> {
-        let system_id = self.telemetry().system_id().map(|x| x.to_string());
-        let cloud_client = self.cloud_client();
-        let result = llm_token
-            .clear_and_refresh(&cloud_client, system_id, organization_id)
-            .await;
-        if let Err(ClientApiError::Unauthorized) = result {
-            self.request_sign_out();
-        }
-        result
-    }
-
     pub async fn sign_out(self: &Arc<Self>, cx: &AsyncApp) {
         self.state.write().credentials = None;
         self.cloud_client.clear_credentials();
@@ -1928,64 +1857,6 @@ impl ProtoClient for Client {
 
 /// prefix for the zed:// url scheme
 pub const ZED_URL_SCHEME: &str = "zed";
-
-/// A parsed Zed link that can be handled internally by the application.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ZedLink {
-    /// Join a channel: `zed.dev/channel/channel-name-123` or `zed://channel/channel-name-123`
-    Channel { channel_id: u64 },
-    /// Open channel notes: `zed.dev/channel/channel-name-123/notes` or with heading `notes#heading`
-    ChannelNotes {
-        channel_id: u64,
-        heading: Option<String>,
-    },
-}
-
-/// Parses the given link into a Zed link.
-///
-/// Returns a [`Some`] containing the parsed link if the link is a recognized Zed link
-/// that should be handled internally by the application.
-/// Returns [`None`] for links that should be opened in the browser.
-pub fn parse_zed_link(link: &str, cx: &App) -> Option<ZedLink> {
-    let server_url = &ClientSettings::get_global(cx).server_url;
-    let path = link
-        .strip_prefix(server_url)
-        .and_then(|result| result.strip_prefix('/'))
-        .or_else(|| {
-            link.strip_prefix(ZED_URL_SCHEME)
-                .and_then(|result| result.strip_prefix("://"))
-        })?;
-
-    let mut parts = path.split('/');
-
-    if parts.next() != Some("channel") {
-        return None;
-    }
-
-    let slug = parts.next()?;
-    let id_str = slug.split('-').next_back()?;
-    let channel_id = id_str.parse::<u64>().ok()?;
-
-    let Some(next) = parts.next() else {
-        return Some(ZedLink::Channel { channel_id });
-    };
-
-    if let Some(heading) = next.strip_prefix("notes#") {
-        return Some(ZedLink::ChannelNotes {
-            channel_id,
-            heading: Some(heading.to_string()),
-        });
-    }
-
-    if next == "notes" {
-        return Some(ZedLink::ChannelNotes {
-            channel_id,
-            heading: None,
-        });
-    }
-
-    None
-}
 
 #[cfg(test)]
 mod tests {

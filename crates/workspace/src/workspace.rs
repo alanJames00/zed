@@ -5,8 +5,6 @@ pub mod invalid_item_view;
 pub mod item;
 mod modal_layer;
 mod multi_workspace;
-#[cfg(test)]
-mod multi_workspace_tests;
 pub mod notifications;
 pub mod pane;
 pub mod pane_group;
@@ -41,10 +39,9 @@ pub use path_list::{PathList, SerializedPathList};
 pub use remote::RemoteConnectionIdentity;
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
 
-use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
 use client::{
-    ChannelId, Client, ErrorExt, ParticipantIndex, Status, TypedEnvelope, User, UserStore,
+    ChannelId, Client, ErrorExt, ParticipantIndex, TypedEnvelope, User, UserStore,
     proto::{self, ErrorCode, PanelId, PeerId},
 };
 use collections::{HashMap, HashSet, TypeIdHashMap, hash_map};
@@ -161,7 +158,7 @@ pub use workspace_settings::{
     RestoreOnStartupBehavior, StatusBarSettings, TabBarSettings, WorkspaceSettings,
     closing_last_window_quits_app, observe_accessible_mode,
 };
-use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
+use zed_actions::{Spawn, theme::ToggleMode};
 
 use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
 use crate::{
@@ -9346,7 +9343,6 @@ pub trait AnyActiveCall {
     fn local_participant_is_guest(&self, _: &App) -> bool;
     fn client(&self, _: &App) -> Arc<Client>;
     fn share_on_join(&self, _: &App) -> bool;
-    fn join_channel(&self, _: ChannelId, _: &mut App) -> Task<Result<bool>>;
     fn room_update_completed(&self, _: &mut App) -> Task<()>;
     fn most_active_project(&self, _: &App) -> Option<(u64, u64)>;
     fn share_project(&self, _: Entity<Project>, _: &mut App) -> Task<Result<u64>>;
@@ -9690,11 +9686,6 @@ fn notify_if_database_failed(window: WindowHandle<MultiWorkspace>, cx: &mut Asyn
                         |cx| {
                             cx.new(|cx| {
                                 MessageNotification::new("Failed to load the database file.", cx)
-                                    .primary_message("File an Issue")
-                                    .primary_icon(IconName::Plus)
-                                    .primary_on_click(|window, cx| {
-                                        window.dispatch_action(Box::new(FileBugReport), cx)
-                                    })
                             })
                         },
                     );
@@ -10655,41 +10646,6 @@ fn restore_native_window_state(
 }
 
 actions!(
-    collab,
-    [
-        /// Opens the channel notes for the current call.
-        ///
-        /// Use `collab_panel::OpenSelectedChannelNotes` to open the channel notes for the selected
-        /// channel in the collab panel.
-        ///
-        /// If you want to open a specific channel, use `zed::OpenZedUrl` with a channel notes URL -
-        /// can be copied via "Copy link to section" in the context menu of the channel notes
-        /// buffer. These URLs look like `https://zed.dev/channel/channel-name-CHANNEL_ID/notes`.
-        OpenChannelNotes,
-        /// Mutes your microphone.
-        Mute,
-        /// Deafens yourself (mute both microphone and speakers).
-        Deafen,
-        /// Leaves the current call.
-        LeaveCall,
-        /// Shares the current project with collaborators.
-        ShareProject,
-        /// Shares your screen with collaborators.
-        ScreenShare,
-        /// Copies the current room name and session id for debugging purposes.
-        CopyRoomId,
-    ]
-);
-
-/// Opens the channel notes for a specific channel by its ID.
-#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = collab)]
-#[serde(deny_unknown_fields)]
-pub struct OpenChannelNotesById {
-    pub channel_id: u64,
-}
-
-actions!(
     zed,
     [
         /// Opens the Zed log file.
@@ -10698,147 +10654,6 @@ actions!(
         RevealLogInFileManager
     ]
 );
-
-async fn join_channel_internal(
-    channel_id: ChannelId,
-    app_state: &Arc<AppState>,
-    requesting_window: Option<WindowHandle<MultiWorkspace>>,
-    requesting_workspace: Option<WeakEntity<Workspace>>,
-    active_call: &dyn AnyActiveCall,
-    cx: &mut AsyncApp,
-) -> Result<bool> {
-    let (should_prompt, already_in_channel) = cx.update(|cx| {
-        if !active_call.is_in_room(cx) {
-            return (false, false);
-        }
-
-        let already_in_channel = active_call.channel_id(cx) == Some(channel_id);
-        let should_prompt = active_call.is_sharing_project(cx)
-            && active_call.has_remote_participants(cx)
-            && !already_in_channel;
-        (should_prompt, already_in_channel)
-    });
-
-    if already_in_channel {
-        let task = cx.update(|cx| {
-            if let Some((project, host)) = active_call.most_active_project(cx) {
-                Some(join_in_room_project(project, host, app_state.clone(), cx))
-            } else {
-                None
-            }
-        });
-        if let Some(task) = task {
-            task.await?;
-        }
-        return anyhow::Ok(true);
-    }
-
-    if should_prompt {
-        if let Some(multi_workspace) = requesting_window {
-            let answer = multi_workspace
-                .update(cx, |_, window, cx| {
-                    window.prompt(
-                        PromptLevel::Warning,
-                        "Do you want to switch channels?",
-                        Some("Leaving this call will unshare your current project."),
-                        &["Yes, Join Channel", "Cancel"],
-                        cx,
-                    )
-                })?
-                .await;
-
-            if answer == Ok(1) {
-                return Ok(false);
-            }
-        } else {
-            return Ok(false);
-        }
-    }
-
-    let client = cx.update(|cx| active_call.client(cx));
-
-    let mut client_status = client.status();
-
-    // this loop will terminate within client::CONNECTION_TIMEOUT seconds.
-    'outer: loop {
-        let Some(status) = client_status.recv().await else {
-            anyhow::bail!("error connecting");
-        };
-
-        match status {
-            Status::Connecting
-            | Status::Authenticating
-            | Status::Authenticated
-            | Status::Reconnecting
-            | Status::Reauthenticating
-            | Status::Reauthenticated => continue,
-            Status::Connected { .. } => break 'outer,
-            Status::SignedOut | Status::AuthenticationError => {
-                return Err(ErrorCode::SignedOut.into());
-            }
-            Status::UpgradeRequired => return Err(ErrorCode::UpgradeRequired.into()),
-            Status::ConnectionError | Status::ConnectionLost | Status::ReconnectionError { .. } => {
-                return Err(ErrorCode::Disconnected.into());
-            }
-        }
-    }
-
-    let joined = cx
-        .update(|cx| active_call.join_channel(channel_id, cx))
-        .await?;
-
-    if !joined {
-        return anyhow::Ok(true);
-    }
-
-    cx.update(|cx| active_call.room_update_completed(cx)).await;
-
-    let task = cx.update(|cx| {
-        if let Some((project, host)) = active_call.most_active_project(cx) {
-            return Some(join_in_room_project(project, host, app_state.clone(), cx));
-        }
-
-        // If you are the first to join a channel, see if you should share your project.
-        if !active_call.has_remote_participants(cx)
-            && !active_call.local_participant_is_guest(cx)
-            && let Some(workspace) = requesting_workspace.as_ref().and_then(|w| w.upgrade())
-        {
-            let project = workspace.update(cx, |workspace, cx| {
-                let project = workspace.project.read(cx);
-
-                if !active_call.share_on_join(cx) {
-                    return None;
-                }
-
-                if (project.is_local() || project.is_via_remote_server())
-                    && project.visible_worktrees(cx).any(|tree| {
-                        tree.read(cx)
-                            .root_entry()
-                            .is_some_and(|entry| entry.is_dir())
-                    })
-                {
-                    Some(workspace.project.clone())
-                } else {
-                    None
-                }
-            });
-            if let Some(project) = project {
-                let share_task = active_call.share_project(project, cx);
-                return Some(cx.spawn(async move |_cx| -> Result<()> {
-                    share_task.await?;
-                    Ok(())
-                }));
-            }
-        }
-
-        None
-    });
-    if let Some(task) = task {
-        task.await?;
-        return anyhow::Ok(true);
-    }
-    anyhow::Ok(false)
-}
 
 fn serialize_pane_handle(
     pane_handle: &Entity<Pane>,
@@ -10878,111 +10693,6 @@ fn serialize_pane_handle(
     };
 
     SerializedPane::new(items, active, pinned_count)
-}
-
-pub fn join_channel(
-    channel_id: ChannelId,
-    app_state: Arc<AppState>,
-    requesting_window: Option<WindowHandle<MultiWorkspace>>,
-    requesting_workspace: Option<WeakEntity<Workspace>>,
-    cx: &mut App,
-) -> Task<Result<()>> {
-    let active_call = GlobalAnyActiveCall::global(cx).clone();
-    cx.spawn(async move |cx| {
-        let result = join_channel_internal(
-            channel_id,
-            &app_state,
-            requesting_window,
-            requesting_workspace,
-            &*active_call.0,
-            cx,
-        )
-        .await;
-
-        // join channel succeeded, and opened a window
-        if matches!(result, Ok(true)) {
-            return anyhow::Ok(());
-        }
-
-        // find an existing workspace to focus and show call controls
-        let mut active_window = requesting_window.or_else(|| activate_any_workspace_window(cx));
-        if active_window.is_none() {
-            // no open workspaces, make one to show the error in (blergh)
-            let OpenResult {
-                window: window_handle,
-                ..
-            } = cx
-                .update(|cx| {
-                    Workspace::new_local(
-                        vec![],
-                        app_state.clone(),
-                        requesting_window,
-                        None,
-                        None,
-                        OpenMode::Activate,
-                        cx,
-                    )
-                })
-                .await?;
-
-            window_handle
-                .update(cx, |_, window, _cx| {
-                    window.activate_window();
-                })
-                .ok();
-
-            if result.is_ok() {
-                cx.update(|cx| {
-                    cx.dispatch_action(&OpenChannelNotes);
-                });
-            }
-
-            active_window = Some(window_handle);
-        }
-
-        if let Err(err) = result {
-            log::error!("failed to join channel: {}", err);
-            if let Some(active_window) = active_window {
-                active_window
-                    .update(cx, |_, window, cx| {
-                        let detail: SharedString = match err.error_code() {
-                            ErrorCode::SignedOut => "Please sign in to continue.".into(),
-                            ErrorCode::UpgradeRequired => concat!(
-                                "Your are running an unsupported version of Zed. ",
-                                "Please update to continue."
-                            )
-                            .into(),
-                            ErrorCode::NoSuchChannel => concat!(
-                                "No matching channel was found. ",
-                                "Please check the link and try again."
-                            )
-                            .into(),
-                            ErrorCode::Forbidden => concat!(
-                                "This channel is private, and you do not have access. ",
-                                "Please ask someone to add you and try again."
-                            )
-                            .into(),
-                            ErrorCode::Disconnected => {
-                                "Please check your internet connection and try again.".into()
-                            }
-                            _ => format!("{}\n\nPlease try again.", err).into(),
-                        };
-                        window.prompt(
-                            PromptLevel::Critical,
-                            "Failed to join channel",
-                            Some(&detail),
-                            &["OK"],
-                            cx,
-                        )
-                    })?
-                    .await
-                    .ok();
-            }
-        }
-
-        // return ok, we showed the error to the user.
-        anyhow::Ok(())
-    })
 }
 
 pub async fn get_any_active_multi_workspace(
@@ -11498,14 +11208,7 @@ pub fn open_paths(
                 if let Some(window) = creation_window {
                     window
                         .update(cx, |multi_workspace, _, cx| {
-                            if AgentSettings::get_global(cx).threads_sidebar.auto_open {
-                                multi_workspace.open_sidebar(cx);
-                            } else {
-                                // Opening the sidebar is also what pins the
-                                // workspace we are about to navigate away from,
-                                // so pin it here to keep it in this window.
-                                multi_workspace.retain_active_workspace(cx);
-                            }
+                            multi_workspace.retain_active_workspace(cx);
                         })
                         .log_err();
                 }
@@ -13439,93 +13142,6 @@ mod tests {
         cx.executor().run_until_parked();
         assert!(!cx.has_pending_prompt());
         assert!(!task.await.unwrap());
-    }
-
-    #[gpui::test]
-    async fn test_multi_workspace_close_window_multiple_workspaces_cancel(cx: &mut TestAppContext) {
-        init_test(cx);
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree("/root", json!({ "one": "" })).await;
-
-        let project_a = Project::test(fs.clone(), ["root".as_ref()], cx).await;
-        let project_b = Project::test(fs, ["root".as_ref()], cx).await;
-        let multi_workspace_handle =
-            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
-        cx.run_until_parked();
-
-        multi_workspace_handle
-            .update(cx, |mw, _window, cx| {
-                mw.open_sidebar(cx);
-            })
-            .unwrap();
-
-        let workspace_a = multi_workspace_handle
-            .read_with(cx, |mw, _| mw.workspace().clone())
-            .unwrap();
-
-        let workspace_b = multi_workspace_handle
-            .update(cx, |mw, window, cx| {
-                mw.test_add_workspace(project_b, window, cx)
-            })
-            .unwrap();
-
-        // Activate workspace A
-        multi_workspace_handle
-            .update(cx, |mw, window, cx| {
-                mw.activate(workspace_a.clone(), None, window, cx);
-            })
-            .unwrap();
-
-        let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
-
-        // Workspace A has a clean item
-        let item_a = cx.new(TestItem::new);
-        workspace_a.update_in(cx, |w, window, cx| {
-            w.add_item_to_active_pane(Box::new(item_a.clone()), None, true, window, cx)
-        });
-
-        // Workspace B has a dirty item
-        let item_b = cx.new(|cx| TestItem::new(cx).with_dirty(true));
-        workspace_b.update_in(cx, |w, window, cx| {
-            w.add_item_to_active_pane(Box::new(item_b.clone()), None, true, window, cx)
-        });
-
-        // Verify workspace A is active
-        multi_workspace_handle
-            .read_with(cx, |mw, _| {
-                assert_eq!(mw.workspace(), &workspace_a);
-            })
-            .unwrap();
-
-        // Dispatch CloseWindow — workspace A will pass, workspace B will prompt
-        multi_workspace_handle
-            .update(cx, |mw, window, cx| {
-                mw.close_window(&CloseWindow, window, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-
-        // Workspace B should now be active since it has dirty items that need attention
-        multi_workspace_handle
-            .read_with(cx, |mw, _| {
-                assert_eq!(
-                    mw.workspace(),
-                    &workspace_b,
-                    "workspace B should be activated when it prompts"
-                );
-            })
-            .unwrap();
-
-        // User cancels the save prompt from workspace B
-        cx.simulate_prompt_answer("Cancel");
-        cx.run_until_parked();
-
-        // Window should still exist because workspace B's close was cancelled
-        assert!(
-            multi_workspace_handle.update(cx, |_, _, _| ()).is_ok(),
-            "window should still exist after cancelling one workspace's close"
-        );
     }
 
     #[gpui::test]
@@ -19351,111 +18967,6 @@ mod tests {
         pane.read_with(cx, |pane, _| {
             assert_eq!(pane.items_len(), 2);
             assert_eq!(pane.active_item().unwrap().item_id(), item_b_id);
-        });
-    }
-
-    #[gpui::test]
-    async fn test_panel_zoom_preserved_across_workspace_switch(cx: &mut TestAppContext) {
-        init_test(cx);
-        let fs = FakeFs::new(cx.executor());
-
-        let project_a = Project::test(fs.clone(), [], cx).await;
-        let project_b = Project::test(fs, [], cx).await;
-
-        let multi_workspace_handle =
-            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
-        cx.run_until_parked();
-
-        multi_workspace_handle
-            .update(cx, |mw, _window, cx| {
-                mw.open_sidebar(cx);
-            })
-            .unwrap();
-
-        let workspace_a = multi_workspace_handle
-            .read_with(cx, |mw, _| mw.workspace().clone())
-            .unwrap();
-
-        let _workspace_b = multi_workspace_handle
-            .update(cx, |mw, window, cx| {
-                mw.test_add_workspace(project_b, window, cx)
-            })
-            .unwrap();
-
-        // Switch to workspace A
-        multi_workspace_handle
-            .update(cx, |mw, window, cx| {
-                let workspace = mw.workspaces().next().unwrap().clone();
-                mw.activate(workspace, None, window, cx);
-            })
-            .unwrap();
-
-        let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
-
-        // Add a panel to workspace A's right dock and open the dock
-        let panel = workspace_a.update_in(cx, |workspace, window, cx| {
-            let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
-            workspace.add_panel(panel.clone(), window, cx);
-            workspace
-                .right_dock()
-                .update(cx, |dock, cx| dock.set_open(true, window, cx));
-            panel
-        });
-
-        // Focus the panel through the workspace (matching existing test pattern)
-        workspace_a.update_in(cx, |workspace, window, cx| {
-            workspace.toggle_panel_focus::<TestPanel>(window, cx);
-        });
-
-        // Zoom the panel
-        panel.update_in(cx, |panel, window, cx| {
-            panel.set_zoomed(true, window, cx);
-        });
-
-        // Verify the panel is zoomed and the dock is open
-        workspace_a.update_in(cx, |workspace, window, cx| {
-            assert!(
-                workspace.right_dock().read(cx).is_open(),
-                "dock should be open before switch"
-            );
-            assert!(
-                panel.is_zoomed(window, cx),
-                "panel should be zoomed before switch"
-            );
-            assert!(
-                panel.read(cx).focus_handle(cx).contains_focused(window, cx),
-                "panel should be focused before switch"
-            );
-        });
-
-        // Switch to workspace B
-        multi_workspace_handle
-            .update(cx, |mw, window, cx| {
-                let workspace = mw.workspaces().nth(1).unwrap().clone();
-                mw.activate(workspace, None, window, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-
-        // Switch back to workspace A
-        multi_workspace_handle
-            .update(cx, |mw, window, cx| {
-                let workspace = mw.workspaces().next().unwrap().clone();
-                mw.activate(workspace, None, window, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-
-        // Verify the panel is still zoomed and the dock is still open
-        workspace_a.update_in(cx, |workspace, window, cx| {
-            assert!(
-                workspace.right_dock().read(cx).is_open(),
-                "dock should still be open after switching back"
-            );
-            assert!(
-                panel.is_zoomed(window, cx),
-                "panel should still be zoomed after switching back"
-            );
         });
     }
 
