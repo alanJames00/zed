@@ -29,7 +29,6 @@ members = [
     "crates/debug_adapter_extension",
     "crates/debugger_tools",
     "crates/debugger_ui",
-    "crates/dev_container",
     "crates/diagnostics",
     "crates/docs_preprocessor",
     "crates/edit_prediction_types",
@@ -134,7 +133,6 @@ members = [
     "crates/reqwest_client",
     "crates/rope",
     "crates/rpc",
-    "crates/sandbox",
     "crates/scheduler",
     "crates/schema_generator",
     "crates/search",
@@ -252,7 +250,6 @@ debug_adapter_extension = { path = "crates/debug_adapter_extension" }
 debugger_tools = { path = "crates/debugger_tools" }
 debugger_ui = { path = "crates/debugger_ui" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
-dev_container = { path = "crates/dev_container" }
 diagnostics = { path = "crates/diagnostics" }
 edit_prediction_types = { path = "crates/edit_prediction_types" }
 editor = { path = "crates/editor" }
@@ -351,7 +348,6 @@ reqwest_client = { path = "crates/reqwest_client" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "3ee9745862279ce1d18db593155016e7ce024aeb", default-features = false, features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }
-sandbox = { path = "crates/sandbox" }
 scheduler = { path = "crates/scheduler" }
 search = { path = "crates/search" }
 session = { path = "crates/session" }

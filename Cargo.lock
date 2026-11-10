@@ -3025,39 +3025,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dev_container"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-tar",
- "async-trait",
- "env_logger 0.11.8",
- "fs",
- "futures 0.3.34",
- "gpui",
- "http",
- "http_client",
- "indoc",
- "log",
- "menu",
- "picker",
- "project",
- "regex",
- "serde",
- "serde_json",
- "serde_json_lenient",
- "serde_yaml_ng",
- "settings",
- "shlex 2.0.1",
- "ui",
- "util",
- "walkdir",
- "workspace",
- "worktree",
- "yaml-rust2",
-]
-
-[[package]]
 name = "diagnostics"
 version = "0.1.0"
 dependencies = [
@@ -8134,7 +8101,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
- "memoffset",
 ]
 
 [[package]]
@@ -11172,7 +11138,6 @@ dependencies = [
  "askpass",
  "chrono",
  "db",
- "dev_container",
  "editor",
  "extension",
  "extension_host",
@@ -11921,25 +11886,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sandbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures 0.3.34",
- "gpui",
- "http_proxy",
- "libc",
- "log",
- "nix",
- "seccompiler",
- "serde",
- "serde_json",
- "smol",
- "tempfile",
- "windows-registry 0.6.1",
-]
-
-[[package]]
 name = "schannel"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12061,15 +12007,6 @@ dependencies = [
  "workspace",
  "zed_actions",
  "ztracing",
-]
-
-[[package]]
-name = "seccompiler"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
-dependencies = [
- "libc",
 ]
 
 [[package]]
@@ -17600,7 +17537,6 @@ dependencies = [
  "debug_adapter_extension",
  "debugger_tools",
  "debugger_ui",
- "dev_container",
  "diagnostics",
  "editor",
  "encoding_selector",
@@ -17668,7 +17604,6 @@ dependencies = [
  "remote_server",
  "reqwest_client",
  "rope",
- "sandbox",
  "search",
  "semver",
  "serde",

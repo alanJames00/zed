@@ -22,10 +22,6 @@ enum CliCommand {
     /// Inspect the GPUI publish plan and its dependencies.
     #[command(subcommand)]
     Gpui(tasks::gpui::GpuiCommand),
-    /// Runs the Linux Bubblewrap sandboxing NixOS VM tests.
-    SandboxTests(tasks::sandbox_tests::SandboxTestsArgs),
-    /// Runs the Windows WSL Bubblewrap sandbox behavior tests.
-    WslSandboxTests(tasks::wsl_sandbox_tests::WslSandboxTestsArgs),
     /// Builds GPUI web examples and serves them.
     WebExamples(tasks::web_examples::WebExamplesArgs),
     Workflows(tasks::workflows::GenerateWorkflowArgs),
@@ -43,8 +39,6 @@ fn main() -> Result<()> {
             tasks::package_conformity::run_package_conformity(args)
         }
         CliCommand::Gpui(args) => tasks::gpui::run_gpui(args),
-        CliCommand::SandboxTests(args) => tasks::sandbox_tests::run_sandbox_tests(args),
-        CliCommand::WslSandboxTests(args) => tasks::wsl_sandbox_tests::run_wsl_sandbox_tests(args),
         CliCommand::WebExamples(args) => tasks::web_examples::run_web_examples(args),
         CliCommand::Workflows(args) => tasks::workflows::run_workflows(args),
         CliCommand::CheckWorkflows(args) => tasks::workflow_checks::validate(args),

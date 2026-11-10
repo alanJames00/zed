@@ -7,7 +7,7 @@
 //! hostname that the sandbox distrusts can exploit that window to point a
 //! "granted" host at loopback, the LAN, or a cloud metadata endpoint.
 //!
-//! [`PinnedHost`] closes that window the way [`sandbox::HostFilesystemLocation`]
+//! [`PinnedHost`] closes that window the way `sandbox::HostFilesystemLocation`
 //! does for filesystem paths: construction resolves the name and vets every
 //! address *once*, and the resulting value carries the checked addresses by
 //! value. The type is deliberately opaque — it never hands back the hostname for

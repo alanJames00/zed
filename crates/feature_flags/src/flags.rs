@@ -98,24 +98,3 @@ impl FeatureFlag for AgentThreadWorktreeLabelFlag {
     }
 }
 register_feature_flag!(AgentThreadWorktreeLabelFlag);
-
-/// Wraps agent-run terminal commands in an OS-level sandbox where supported,
-/// and applies the shared per-host network grants to the `fetch` tool and the
-/// out-of-project write grants to the `create_directory` tool. When off,
-/// these tools run with the agent's full ambient permissions, as they always
-/// have.
-pub struct SandboxingFeatureFlag;
-
-impl FeatureFlag for SandboxingFeatureFlag {
-    const NAME: &'static str = "sandboxing";
-    type Value = PresenceFlag;
-
-    fn enabled_for_all() -> bool {
-        true
-    }
-
-    fn enabled_for_staff() -> bool {
-        false
-    }
-}
-register_feature_flag!(SandboxingFeatureFlag);

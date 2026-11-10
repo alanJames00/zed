@@ -30,8 +30,9 @@ These features are stripped out to make the editor lighter and quieter:
 - **Collaboration.** This covers calls, screen sharing, channels and the collab server.
 - **REPL and Jupyter notebook support.**
 - **The AI agent and LLM providers.**
+- **Dev containers and the OS sandbox.**
 
-[REMOVABLE_FEATURES.md](./REMOVABLE_FEATURES.md) is an audit of what else could be cut, ranked by estimated savings. Several items on it are already done (#1 to #4 and #7).
+[REMOVABLE_FEATURES.md](./REMOVABLE_FEATURES.md) is an audit of what else could be cut, ranked by estimated savings. Several items on it are already done (#1 to #4, #7 and #8).
 
 ---
 
