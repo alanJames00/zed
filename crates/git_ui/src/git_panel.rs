@@ -3095,8 +3095,8 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entry_primary_click_action =
-            GitPanelSettings::get_global(cx).entry_primary_click_action;
+        let entry_primary_click_action = GitPanelSettings::get_global(cx)
+            .effective_entry_primary_click_action();
         let action = match (entry_primary_click_action, secondary) {
             (GitPanelClickBehavior::ProjectDiff, false) => GitPanelClickBehavior::ProjectDiff,
             (GitPanelClickBehavior::ProjectDiff, true) => GitPanelClickBehavior::FileDiff,

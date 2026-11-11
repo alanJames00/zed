@@ -32,7 +32,7 @@ pub struct GitPanelSettings {
     pub show_count_badge: bool,
     pub starts_open: bool,
     pub commit_title_max_length: usize,
-    pub entry_primary_click_action: GitPanelClickBehavior,
+    pub entry_primary_click_action: Option<GitPanelClickBehavior>,
     pub commit_editor: GitPanelCommitEditor,
     pub layout: GitPanelLayout,
     pub untracked_changes: GitPanelUntrackedChanges,
@@ -74,6 +74,17 @@ impl GitPanelSettings {
         }
     }
 
+    /// VS Code opens a diff per file, whereas the other layouts scroll through
+    /// the combined project diff. An explicit user setting wins in both.
+    pub fn effective_entry_primary_click_action(&self) -> GitPanelClickBehavior {
+        self.entry_primary_click_action
+            .unwrap_or(if self.is_vscode_layout() {
+                GitPanelClickBehavior::FileDiff
+            } else {
+                GitPanelClickBehavior::ProjectDiff
+            })
+    }
+
     pub fn effective_untracked_changes(&self) -> GitPanelUntrackedChanges {
         if self.is_vscode_layout() {
             self.untracked_changes
@@ -109,7 +120,7 @@ impl Settings for GitPanelSettings {
             show_count_badge: git_panel.show_count_badge.unwrap(),
             starts_open: git_panel.starts_open.unwrap(),
             commit_title_max_length: git_panel.commit_title_max_length.unwrap(),
-            entry_primary_click_action: git_panel.entry_primary_click_action.unwrap(),
+            entry_primary_click_action: git_panel.entry_primary_click_action,
             commit_editor: git_panel.commit_editor.unwrap(),
             layout: git_panel.layout.unwrap(),
             untracked_changes: git_panel.untracked_changes.unwrap(),

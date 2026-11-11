@@ -1155,10 +1155,12 @@
     // Default: 0
     "commit_title_max_length": 0,
     // Default action when clicking a changed file in the Git panel.
+    // Unset by default so the `vscode` layout can open per-file diffs while
+    // the other layouts open the multi-file project diff.
     //
     // Choices: project_diff, file_diff, view_file
-    // Default: project_diff
-    "entry_primary_click_action": "project_diff",
+    // Default: file_diff with the `vscode` layout, otherwise project_diff
+    // "entry_primary_click_action": "project_diff",
     // Whether the commit message editor is shown in the git panel by default.
     //
     // Choices: expanded, collapsed
