@@ -1158,7 +1158,7 @@ mod element {
 
     use super::{HANDLE_HITBOX_SIZE, HORIZONTAL_MIN_SIZE, VERTICAL_MIN_SIZE};
 
-    const DIVIDER_SIZE: f32 = 1.0;
+    const DIVIDER_SIZE: f32 = 2.0;
 
     pub(super) fn pane_axis(
         axis: Axis,
