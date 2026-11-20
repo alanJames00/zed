@@ -1018,6 +1018,7 @@
     "context": "Terminal",
     "use_key_equivalents": true,
     "bindings": {
+      "ctrl-shift-j": "terminal_panel::SearchTerminals",
       "ctrl-alt-space": "terminal::ShowCharacterPalette",
       "ctrl-insert": "terminal::Copy",
       "ctrl-shift-c": "terminal::Copy",

@@ -5,6 +5,7 @@ use crate::{
     persistence::{
         SerializedItems, SerializedTerminalPanel, deserialize_terminal_panel, serialize_pane_group,
     },
+    terminal_switcher::TerminalSwitcher,
 };
 use breadcrumbs::Breadcrumbs;
 use collections::HashMap;
@@ -52,7 +53,9 @@ actions!(
         /// Toggles the terminal panel.
         Toggle,
         /// Toggles focus on the terminal panel.
-        ToggleFocus
+        ToggleFocus,
+        /// Searches open terminals by name and jumps to the selected one.
+        SearchTerminals
     ]
 );
 
@@ -64,6 +67,11 @@ pub fn init(cx: &mut App) {
             workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
                 if is_enabled_in_workspace(workspace, cx) {
                     workspace.toggle_panel_focus::<TerminalPanel>(window, cx);
+                }
+            });
+            workspace.register_action(|workspace, _: &SearchTerminals, window, cx| {
+                if is_enabled_in_workspace(workspace, cx) {
+                    TerminalSwitcher::toggle(workspace, window, cx);
                 }
             });
             workspace.register_action(|workspace, _: &Toggle, window, cx| {
@@ -2129,6 +2137,16 @@ fn render_pane_buttons(pane: &Pane, pane_handle: Entity<Pane>, cx: &App) -> AnyE
     h_flex()
         .gap(DynamicSpacing::Base02.rems(cx))
         .child(
+            IconButton::new("search-terminals", IconName::MagnifyingGlass)
+                .icon_size(IconSize::Small)
+                .tooltip(|_window, cx| {
+                    Tooltip::for_action("Search Terminals", &SearchTerminals, cx)
+                })
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(SearchTerminals.boxed_clone(), cx);
+                }),
+        )
+        .child(
             PopoverMenu::new("terminal-tab-bar-popover-menu")
                 .trigger_with_tooltip(
                     IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
@@ -4042,6 +4060,79 @@ mod tests {
         assert_eq!(
             center_items_after, center_items_before,
             "Center pane should not gain a new terminal when panel is focused"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_search_terminals_jumps_to_selected_terminal(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel) = init_vertical_terminal_list(3, cx).await;
+        let cx = &mut cx;
+
+        let terminals = terminal_panel.read_with(cx, |terminal_panel, cx| {
+            terminal_panel
+                .active_pane
+                .read(cx)
+                .items()
+                .filter_map(|item| item.downcast::<TerminalView>())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(terminals.len(), 3);
+        for (terminal, title) in terminals.iter().zip(["server", "database", "logs"]) {
+            terminal.update(cx, |terminal, cx| {
+                terminal.set_custom_title(Some(title.to_string()), cx)
+            });
+        }
+        let logs_focus_handle =
+            terminals[2].read_with(cx, |terminal, _| terminal.focus_handle.clone());
+        cx.update(|window, cx| window.focus(&logs_focus_handle, cx));
+        cx.run_until_parked();
+
+        let workspace = terminal_panel.read_with(cx, |terminal_panel, _| {
+            terminal_panel
+                .workspace
+                .upgrade()
+                .expect("the terminal panel's workspace should exist")
+        });
+        let switcher_is_open = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.active_modal::<TerminalSwitcher>(cx).is_some()
+            })
+        };
+
+        cx.dispatch_action(SearchTerminals);
+        cx.run_until_parked();
+        assert!(
+            switcher_is_open(cx),
+            "SearchTerminals should open the terminal switcher"
+        );
+
+        cx.simulate_input("datab");
+        cx.run_until_parked();
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+
+        assert!(
+            !switcher_is_open(cx),
+            "confirming a terminal should close the switcher"
+        );
+        let database_terminal_id = terminals[1].entity_id();
+        let active_terminal_id = terminal_panel.read_with(cx, |terminal_panel, cx| {
+            terminal_panel
+                .active_pane
+                .read(cx)
+                .active_item()
+                .map(|item| item.item_id())
+        });
+        assert_eq!(
+            active_terminal_id,
+            Some(database_terminal_id),
+            "confirming a search should activate the matching terminal"
+        );
+        let database_focus_handle =
+            terminals[1].read_with(cx, |terminal, _| terminal.focus_handle.clone());
+        assert!(
+            cx.update(|window, _| database_focus_handle.is_focused(window)),
+            "the selected terminal should take focus"
         );
     }
 
