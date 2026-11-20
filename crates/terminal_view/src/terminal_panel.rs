@@ -4063,12 +4063,17 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn test_search_terminals_jumps_to_selected_terminal(cx: &mut TestAppContext) {
+    /// Opens three terminals named "server", "database" and "logs", with "logs" focused.
+    async fn init_named_terminals(
+        cx: &mut TestAppContext,
+    ) -> (
+        VisualTestContext,
+        Entity<TerminalPanel>,
+        Vec<Entity<TerminalView>>,
+        Entity<Workspace>,
+    ) {
         let (mut cx, terminal_panel) = init_vertical_terminal_list(3, cx).await;
-        let cx = &mut cx;
-
-        let terminals = terminal_panel.read_with(cx, |terminal_panel, cx| {
+        let terminals = terminal_panel.read_with(&cx, |terminal_panel, cx| {
             terminal_panel
                 .active_pane
                 .read(cx)
@@ -4078,31 +4083,60 @@ mod tests {
         });
         assert_eq!(terminals.len(), 3);
         for (terminal, title) in terminals.iter().zip(["server", "database", "logs"]) {
-            terminal.update(cx, |terminal, cx| {
+            terminal.update(&mut cx, |terminal, cx| {
                 terminal.set_custom_title(Some(title.to_string()), cx)
             });
         }
         let logs_focus_handle =
-            terminals[2].read_with(cx, |terminal, _| terminal.focus_handle.clone());
+            terminals[2].read_with(&cx, |terminal, _| terminal.focus_handle.clone());
         cx.update(|window, cx| window.focus(&logs_focus_handle, cx));
         cx.run_until_parked();
 
-        let workspace = terminal_panel.read_with(cx, |terminal_panel, _| {
+        let workspace = terminal_panel.read_with(&cx, |terminal_panel, _| {
             terminal_panel
                 .workspace
                 .upgrade()
                 .expect("the terminal panel's workspace should exist")
         });
-        let switcher_is_open = |cx: &mut VisualTestContext| {
-            workspace.read_with(cx, |workspace, cx| {
-                workspace.active_modal::<TerminalSwitcher>(cx).is_some()
-            })
-        };
+        (cx, terminal_panel, terminals, workspace)
+    }
+
+    fn terminal_switcher_is_open(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> bool {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<TerminalSwitcher>(cx).is_some()
+        })
+    }
+
+    fn active_terminal_id(
+        terminal_panel: &Entity<TerminalPanel>,
+        cx: &VisualTestContext,
+    ) -> Option<EntityId> {
+        terminal_panel.read_with(cx, |terminal_panel, cx| {
+            terminal_panel
+                .active_pane
+                .read(cx)
+                .active_item()
+                .map(|item| item.item_id())
+        })
+    }
+
+    fn terminal_is_focused(terminal: &Entity<TerminalView>, cx: &mut VisualTestContext) -> bool {
+        let focus_handle = terminal.read_with(cx, |terminal, _| terminal.focus_handle.clone());
+        cx.update(|window, _| focus_handle.is_focused(window))
+    }
+
+    #[gpui::test]
+    async fn test_search_terminals_jumps_to_selected_terminal(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel, terminals, workspace) = init_named_terminals(cx).await;
+        let cx = &mut cx;
 
         cx.dispatch_action(SearchTerminals);
         cx.run_until_parked();
         assert!(
-            switcher_is_open(cx),
+            terminal_switcher_is_open(&workspace, cx),
             "SearchTerminals should open the terminal switcher"
         );
 
@@ -4112,28 +4146,72 @@ mod tests {
         cx.run_until_parked();
 
         assert!(
-            !switcher_is_open(cx),
+            !terminal_switcher_is_open(&workspace, cx),
             "confirming a terminal should close the switcher"
         );
-        let database_terminal_id = terminals[1].entity_id();
-        let active_terminal_id = terminal_panel.read_with(cx, |terminal_panel, cx| {
-            terminal_panel
-                .active_pane
-                .read(cx)
-                .active_item()
-                .map(|item| item.item_id())
-        });
         assert_eq!(
-            active_terminal_id,
-            Some(database_terminal_id),
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[1].entity_id()),
             "confirming a search should activate the matching terminal"
         );
-        let database_focus_handle =
-            terminals[1].read_with(cx, |terminal, _| terminal.focus_handle.clone());
         assert!(
-            cx.update(|window, _| database_focus_handle.is_focused(window)),
+            terminal_is_focused(&terminals[1], cx),
             "the selected terminal should take focus"
         );
+    }
+
+    #[gpui::test]
+    async fn test_search_terminals_previews_selection(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel, terminals, workspace) = init_named_terminals(cx).await;
+        let cx = &mut cx;
+
+        cx.dispatch_action(SearchTerminals);
+        cx.run_until_parked();
+        cx.simulate_input("serv");
+        cx.run_until_parked();
+        assert_eq!(
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[0].entity_id()),
+            "the top match should be previewed while typing"
+        );
+        assert!(
+            terminal_switcher_is_open(&workspace, cx) && !terminal_is_focused(&terminals[0], cx),
+            "previewing should leave focus in the switcher"
+        );
+
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+        assert!(!terminal_switcher_is_open(&workspace, cx));
+        assert_eq!(
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[2].entity_id()),
+            "dismissing the switcher should restore the terminal that was active before it opened"
+        );
+        assert!(
+            terminal_is_focused(&terminals[2], cx),
+            "dismissing the switcher should return focus to the original terminal"
+        );
+
+        // With an empty query the active terminal ("logs", the last one) is selected first, so
+        // moving up previews "database".
+        cx.dispatch_action(SearchTerminals);
+        cx.run_until_parked();
+        cx.dispatch_action(menu::SelectPrevious);
+        cx.run_until_parked();
+        assert_eq!(
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[1].entity_id()),
+            "moving the selection should preview the newly selected terminal"
+        );
+
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert_eq!(
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[1].entity_id()),
+            "confirming a previewed terminal should keep it active"
+        );
+        assert!(terminal_is_focused(&terminals[1], cx));
     }
 
     fn set_max_tabs(cx: &mut TestAppContext, value: Option<usize>) {
