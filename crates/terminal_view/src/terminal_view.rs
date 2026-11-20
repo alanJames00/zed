@@ -29,7 +29,10 @@ use std::{
     ops::Range as StdRange,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use task::TaskId;
@@ -154,6 +157,8 @@ pub struct TerminalView {
     blinking_terminal_enabled: bool,
     needs_serialize: bool,
     custom_title: Option<String>,
+    /// When this terminal last took focus, from a counter shared by all terminal views.
+    last_focused: Option<usize>,
     hover: Option<HoverTarget>,
     hover_tooltip_update: Task<()>,
     workspace_id: Option<WorkspaceId>,
@@ -311,6 +316,7 @@ impl TerminalView {
             scroll_handle,
             needs_serialize: false,
             custom_title: None,
+            last_focused: None,
             ime_state: None,
             self_handle: cx.entity().downgrade(),
             rename_editor: None,
@@ -477,6 +483,10 @@ impl TerminalView {
 
     pub fn has_bell(&self) -> bool {
         self.has_bell
+    }
+
+    pub(crate) fn last_focused(&self) -> Option<usize> {
+        self.last_focused
     }
 
     pub fn custom_title(&self) -> Option<&str> {
@@ -1391,6 +1401,8 @@ impl TerminalView {
     }
 
     fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        static FOCUS_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        self.last_focused = Some(FOCUS_COUNTER.fetch_add(1, Ordering::Relaxed));
         self.terminal.update(cx, |terminal, _| {
             terminal.set_cursor_shape(self.cursor_shape);
             if !self.read_only {

@@ -927,7 +927,7 @@ impl TerminalPanel {
         })
     }
 
-    fn add_terminal_shell(
+    pub(crate) fn add_terminal_shell(
         &mut self,
         force_local: bool,
         cwd: Option<PathBuf>,
@@ -4192,15 +4192,20 @@ mod tests {
             "dismissing the switcher should return focus to the original terminal"
         );
 
-        // With an empty query the active terminal ("logs", the last one) is selected first, so
-        // moving up previews "database".
+        // With an empty query the previously used terminal ("database") is selected first, and
+        // moving down from it previews the least recently used one ("server").
         cx.dispatch_action(SearchTerminals);
-        cx.run_until_parked();
-        cx.dispatch_action(menu::SelectPrevious);
         cx.run_until_parked();
         assert_eq!(
             active_terminal_id(&terminal_panel, cx),
             Some(terminals[1].entity_id()),
+            "opening the switcher should preview the previously used terminal"
+        );
+        cx.dispatch_action(menu::SelectNext);
+        cx.run_until_parked();
+        assert_eq!(
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[0].entity_id()),
             "moving the selection should preview the newly selected terminal"
         );
 
@@ -4208,10 +4213,76 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             active_terminal_id(&terminal_panel, cx),
-            Some(terminals[1].entity_id()),
+            Some(terminals[0].entity_id()),
             "confirming a previewed terminal should keep it active"
         );
-        assert!(terminal_is_focused(&terminals[1], cx));
+        assert!(terminal_is_focused(&terminals[0], cx));
+    }
+
+    #[gpui::test]
+    async fn test_search_terminals_orders_by_recent_use(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel, terminals, _workspace) = init_named_terminals(cx).await;
+        let cx = &mut cx;
+
+        // Terminals were created as server, database, logs, so "database" was used just before
+        // the active "logs".
+        cx.dispatch_action(SearchTerminals);
+        cx.run_until_parked();
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert_eq!(
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[1].entity_id()),
+            "confirming right away should switch to the previously used terminal"
+        );
+
+        cx.dispatch_action(SearchTerminals);
+        cx.run_until_parked();
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert_eq!(
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[2].entity_id()),
+            "confirming right away again should switch back"
+        );
+        assert!(terminal_is_focused(&terminals[2], cx));
+    }
+
+    #[gpui::test]
+    async fn test_search_terminals_creates_terminal_from_query(cx: &mut TestAppContext) {
+        let (mut cx, terminal_panel, terminals, workspace) = init_named_terminals(cx).await;
+        let cx = &mut cx;
+
+        cx.dispatch_action(SearchTerminals);
+        cx.run_until_parked();
+        cx.simulate_input("zzz build");
+        cx.run_until_parked();
+        assert_eq!(
+            active_terminal_id(&terminal_panel, cx),
+            Some(terminals[2].entity_id()),
+            "a query with no matches should not preview another terminal"
+        );
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+
+        assert!(!terminal_switcher_is_open(&workspace, cx));
+        let (terminal_count, active_title) =
+            terminal_panel.read_with(cx, |terminal_panel, cx| {
+                let pane = terminal_panel.active_pane.read(cx);
+                let active_title = pane
+                    .active_item()
+                    .and_then(|item| item.downcast::<TerminalView>())
+                    .and_then(|terminal_view| {
+                        terminal_view.read(cx).custom_title().map(str::to_string)
+                    });
+                (pane.items_len(), active_title)
+            });
+        assert_eq!(terminal_count, 4, "confirming should create a terminal");
+        assert_eq!(
+            active_title.as_deref(),
+            Some("zzz build"),
+            "the new terminal should be active and titled after the query"
+        );
     }
 
     fn set_max_tabs(cx: &mut TestAppContext, value: Option<usize>) {

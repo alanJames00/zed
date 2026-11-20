@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    cmp::{self, Reverse},
+    sync::Arc,
+};
 
 use fuzzy_nucleo::{StringMatch, StringMatchCandidate};
 use gpui::{
@@ -6,12 +9,13 @@ use gpui::{
     WeakEntity, Window, rems,
 };
 use picker::{Picker, PickerDelegate};
+use task::RevealStrategy;
 use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
 use util::ResultExt;
 use util::paths::PathExt;
 use workspace::{DismissDecision, ModalView, Pane, Workspace, item::ItemHandle};
 
-use crate::{TerminalView, terminal_panel::TerminalPanel};
+use crate::{TerminalView, default_working_directory, terminal_panel::TerminalPanel};
 
 const SWITCHER_WIDTH_REMS: f32 = 28.;
 
@@ -94,8 +98,13 @@ struct TerminalCandidate {
 pub struct TerminalSwitcherDelegate {
     switcher: WeakEntity<TerminalSwitcher>,
     workspace: WeakEntity<Workspace>,
+    terminal_panel: WeakEntity<TerminalPanel>,
+    /// Ordered by most recent use, with the active terminal first.
     candidates: Vec<TerminalCandidate>,
     matches: Vec<StringMatch>,
+    /// Set when a query matches no terminal, adding a row after the matches that creates a
+    /// terminal with this title.
+    new_terminal_title: Option<String>,
     selected_index: usize,
     initial_index: usize,
     /// Each pane's active terminal when the switcher opened, restored if the switcher is
@@ -111,11 +120,11 @@ impl TerminalSwitcherDelegate {
         terminal_panel: &Entity<TerminalPanel>,
         cx: &App,
     ) -> Self {
+        let weak_terminal_panel = terminal_panel.downgrade();
         let terminal_panel = terminal_panel.read(cx);
         let panes = terminal_panel.center.panes();
         let is_split = panes.len() > 1;
-        let mut candidates = Vec::new();
-        let mut initial_index = 0;
+        let mut ranked_candidates = Vec::new();
         let mut original_active_items = Vec::new();
         for (pane_index, pane_handle) in panes.into_iter().enumerate() {
             let pane = pane_handle.read(cx);
@@ -125,34 +134,52 @@ impl TerminalSwitcherDelegate {
                 original_active_items.push((pane_handle.downgrade(), active_item));
             }
             for (item_index, item) in pane.items().enumerate() {
-                if is_active_pane && item_index == active_item_index {
-                    initial_index = candidates.len();
-                }
+                let is_current = is_active_pane && item_index == active_item_index;
                 let title = item.tab_content_text(0, cx);
-                let detail = item
-                    .downcast::<TerminalView>()
+                let terminal_view = item.downcast::<TerminalView>();
+                // Ranking by focus rather than pane activation keeps previews, which activate
+                // items without focusing them, from reordering the list.
+                let last_focused = terminal_view
+                    .as_ref()
+                    .and_then(|terminal_view| terminal_view.read(cx).last_focused());
+                let detail = terminal_view
                     .and_then(|terminal_view| terminal_detail(terminal_view.read(cx), cx));
                 let search_text = match &detail {
                     Some(detail) => format!("{title} {detail}"),
                     None => title.to_string(),
                 };
-                candidates.push(TerminalCandidate {
+                let candidate = TerminalCandidate {
                     pane: pane_handle.downgrade(),
                     item: item.boxed_clone(),
                     title,
                     detail,
                     search_text,
                     pane_number: is_split.then_some(pane_index + 1),
-                });
+                };
+                ranked_candidates.push((is_current, last_focused, candidate));
             }
         }
+        // The active terminal goes first even if it was never focused, as with a terminal restored
+        // from the previous session.
+        ranked_candidates.sort_by_key(|(is_current, last_focused, _)| {
+            (Reverse(*is_current), Reverse(*last_focused))
+        });
+        let candidates = ranked_candidates
+            .into_iter()
+            .map(|(_, _, candidate)| candidate)
+            .collect::<Vec<_>>();
+        // Like alt-tab, start on the previously used terminal so confirming right away switches
+        // back to it.
+        let initial_index = cmp::min(1, candidates.len().saturating_sub(1));
 
         let matches = Self::all_candidates_as_matches(&candidates);
         Self {
             switcher,
             workspace,
+            terminal_panel: weak_terminal_panel,
             candidates,
             matches,
+            new_terminal_title: None,
             selected_index: initial_index,
             initial_index,
             original_active_items,
@@ -182,6 +209,7 @@ impl TerminalSwitcherDelegate {
     /// Shows the selected terminal in its pane without moving focus out of the switcher.
     fn preview_selected(&self, window: &mut Window, cx: &mut Context<Picker<Self>>) {
         let Some(candidate) = self.selected_candidate() else {
+            self.show_original_active_items(window, cx);
             return;
         };
         let Some(pane) = candidate.pane.upgrade() else {
@@ -202,6 +230,10 @@ impl TerminalSwitcherDelegate {
         // Restoring twice is harmless, but marking it done keeps a later dismissal from
         // undoing anything the user changes after this one.
         self.confirmed = true;
+        self.show_original_active_items(window, cx);
+    }
+
+    fn show_original_active_items(&self, window: &mut Window, cx: &mut Context<Picker<Self>>) {
         for (pane, item) in &self.original_active_items {
             let Some(pane) = pane.upgrade() else {
                 continue;
@@ -212,6 +244,60 @@ impl TerminalSwitcherDelegate {
                 }
             });
         }
+    }
+
+    fn selected_new_terminal_title(&self) -> Option<&str> {
+        if self.selected_index == self.matches.len() {
+            self.new_terminal_title.as_deref()
+        } else {
+            None
+        }
+    }
+
+    fn create_terminal(
+        &mut self,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        self.restore_unless_confirmed(window, cx);
+        let (Some(workspace), Some(terminal_panel)) =
+            (self.workspace.upgrade(), self.terminal_panel.upgrade())
+        else {
+            self.dismiss(cx);
+            return;
+        };
+        let working_directory = default_working_directory(workspace.read(cx), cx);
+        let create_terminal = terminal_panel.update(cx, |terminal_panel, cx| {
+            terminal_panel.add_terminal_shell(
+                false,
+                working_directory,
+                RevealStrategy::Always,
+                window,
+                cx,
+            )
+        });
+        cx.spawn(async move |_, cx| {
+            let terminal = create_terminal.await?;
+            terminal_panel.update(cx, |terminal_panel, cx| {
+                let terminal_view = terminal_panel
+                    .center
+                    .panes()
+                    .into_iter()
+                    .flat_map(|pane| pane.read(cx).items_of_type::<TerminalView>())
+                    .find(|terminal_view| {
+                        terminal_view.read(cx).terminal().entity_id() == terminal.entity_id()
+                    });
+                if let Some(terminal_view) = terminal_view {
+                    terminal_view.update(cx, |terminal_view, cx| {
+                        terminal_view.set_custom_title(Some(title), cx)
+                    });
+                }
+            });
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+        self.dismiss(cx);
     }
 
     fn dismiss(&self, cx: &mut Context<Picker<Self>>) {
@@ -237,7 +323,7 @@ impl PickerDelegate for TerminalSwitcherDelegate {
     }
 
     fn match_count(&self) -> usize {
-        self.matches.len()
+        self.matches.len() + usize::from(self.new_terminal_title.is_some())
     }
 
     fn selected_index(&self) -> usize {
@@ -286,12 +372,20 @@ impl PickerDelegate for TerminalSwitcherDelegate {
             );
             self.selected_index = 0;
         }
+        let trimmed_query = query.trim();
+        self.new_terminal_title = (self.matches.is_empty() && !trimmed_query.is_empty())
+            .then(|| trimmed_query.to_string());
         self.preview_selected(window, cx);
         cx.notify();
         Task::ready(())
     }
 
     fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        if let Some(title) = self.selected_new_terminal_title() {
+            let title = title.to_string();
+            self.create_terminal(title, window, cx);
+            return;
+        }
         let Some(candidate) = self.selected_candidate() else {
             return;
         };
@@ -328,6 +422,17 @@ impl PickerDelegate for TerminalSwitcherDelegate {
         _window: &mut Window,
         _cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
+        if ix == self.matches.len() {
+            let title = self.new_terminal_title.as_ref()?;
+            return Some(
+                ListItem::new(ix)
+                    .spacing(ListItemSpacing::Sparse)
+                    .inset(true)
+                    .toggle_state(selected)
+                    .start_slot(Icon::new(IconName::Plus).color(Color::Muted))
+                    .child(Label::new(format!("New terminal “{title}”")).truncate()),
+            );
+        }
         let string_match = self.matches.get(ix)?;
         let candidate = self.candidates.get(string_match.candidate_id)?;
         let (title_positions, detail_positions) =
