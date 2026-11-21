@@ -1015,6 +1015,7 @@
   {
     "context": "Terminal",
     "bindings": {
+      "ctrl-shift-j": "terminal_panel::SearchTerminals",
       "ctrl-alt-space": "terminal::ShowCharacterPalette",
       "copy": "terminal::Copy",
       "ctrl-insert": "terminal::Copy",
