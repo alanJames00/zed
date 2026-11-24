@@ -3116,8 +3116,8 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entry_primary_click_action = GitPanelSettings::get_global(cx)
-            .effective_entry_primary_click_action();
+        let entry_primary_click_action =
+            GitPanelSettings::get_global(cx).effective_entry_primary_click_action();
         let action = match (entry_primary_click_action, secondary) {
             (GitPanelClickBehavior::ProjectDiff, false) => GitPanelClickBehavior::ProjectDiff,
             (GitPanelClickBehavior::ProjectDiff, true) => GitPanelClickBehavior::FileDiff,
@@ -15587,6 +15587,382 @@ mod tests {
                 .expect("selected entry should be a status entry");
             assert_eq!(selected_entry.repo_path, repo_path("src/a/foo.rs"));
         });
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn run_git(repository_path: &Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(repository_path)
+            .env("GIT_CONFIG_GLOBAL", "")
+            .env("GIT_CONFIG_SYSTEM", "")
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@zed.dev")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@zed.dev")
+            .args(arguments)
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn git_lines(repository_path: &Path, arguments: &[&str]) -> Vec<String> {
+        let mut lines: Vec<String> = run_git(repository_path, arguments)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    struct RealRepository {
+        _directory: tempfile::TempDir,
+        path: std::path::PathBuf,
+        window_handle: gpui::WindowHandle<MultiWorkspace>,
+        project: Entity<Project>,
+        panel: Entity<GitPanel>,
+    }
+
+    impl RealRepository {
+        /// Creates a throwaway repository, lets `populate` write and commit its
+        /// initial state, and opens a git panel on it. The directory is deleted
+        /// when the value is dropped.
+        async fn new(
+            cx: &mut TestAppContext,
+            tree_view: bool,
+            populate: impl FnOnce(&Path),
+        ) -> Self {
+            init_test(cx);
+            cx.executor().allow_parking();
+
+            let directory = tempfile::tempdir().expect("failed to create temp directory");
+            let path = directory.path().canonicalize().unwrap();
+            run_git(&path, &["init", "-b", "main"]);
+            populate(&path);
+
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.git_panel.get_or_insert_default().tree_view = Some(tree_view);
+                    })
+                });
+            });
+
+            let project =
+                Project::test(fs::RealFs::new(None, cx.executor()), [path.as_path()], cx).await;
+            let window_handle =
+                cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+            let workspace = window_handle
+                .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+                .unwrap();
+            let visual_cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+            let panel = workspace.update_in(visual_cx, GitPanel::new);
+
+            Self {
+                _directory: directory,
+                path,
+                window_handle,
+                project,
+                panel,
+            }
+        }
+
+        fn visual_cx(&self, cx: &mut TestAppContext) -> VisualTestContext {
+            VisualTestContext::from_window(self.window_handle.into(), cx)
+        }
+
+        /// Pumps the executor while the real filesystem and git catch up.
+        fn wait_until(
+            &self,
+            cx: &mut VisualTestContext,
+            description: &str,
+            condition: impl Fn(&GitPanel) -> bool,
+        ) {
+            for _ in 0..200 {
+                cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+                cx.executor().run_until_parked();
+                if self.panel.read_with(cx, |panel, _| condition(panel)) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("git panel never reached the expected state: {description}");
+        }
+
+        fn project_path(&self, path: &str, cx: &mut VisualTestContext) -> ProjectPath {
+            let worktree_id = cx.read(|cx| {
+                self.project
+                    .read(cx)
+                    .worktrees(cx)
+                    .next()
+                    .unwrap()
+                    .read(cx)
+                    .id()
+            });
+            ProjectPath {
+                worktree_id,
+                path: RelPath::from_unix_str(path).unwrap().into_arc(),
+            }
+        }
+
+        fn select(&self, path: &str, cx: &mut VisualTestContext) {
+            let project_path = self.project_path(path, cx);
+            self.panel.update_in(cx, |panel, window, cx| {
+                panel.select_entry_by_path(project_path, window, cx);
+            });
+        }
+
+        fn directory_entry(&self, path: &str, cx: &mut VisualTestContext) -> GitListEntry {
+            self.panel.read_with(cx, |panel, _| {
+                panel
+                    .entries
+                    .iter()
+                    .find(|entry| {
+                        matches!(entry, GitListEntry::Directory(directory)
+                            if directory.key.path == repo_path(path))
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| panic!("no directory row for {path}"))
+            })
+        }
+    }
+
+    fn is_staged(panel: &GitPanel, path: &str) -> bool {
+        panel.entries.iter().any(|entry| {
+            entry.status_entry().is_some_and(|status| {
+                status.repo_path == repo_path(path) && status.staging.is_fully_staged()
+            })
+        })
+    }
+
+    fn is_unstaged(panel: &GitPanel, path: &str) -> bool {
+        panel.entries.iter().any(|entry| {
+            entry.status_entry().is_some_and(|status| {
+                status.repo_path == repo_path(path) && status.staging == StageStatus::Unstaged
+            })
+        })
+    }
+
+    fn populate_two_files(path: &Path) {
+        std::fs::write(path.join("tracked.txt"), "one\n").unwrap();
+        run_git(path, &["add", "tracked.txt"]);
+        run_git(path, &["commit", "-m", "Initial commit"]);
+        std::fs::write(path.join("tracked.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(path.join("new.txt"), "new\n").unwrap();
+    }
+
+    #[gpui::test]
+    async fn test_stage_and_commit_against_real_repository(cx: &mut TestAppContext) {
+        let repository = RealRepository::new(cx, false, populate_two_files).await;
+        let cx = &mut repository.visual_cx(cx);
+        let panel = &repository.panel;
+        let path = &repository.path;
+
+        repository.wait_until(cx, "both changes listed", |panel| panel.entry_count == 2);
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            Vec::<String>::new(),
+            "nothing should be staged before the panel acts"
+        );
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.stage_all(&StageAll, window, cx);
+        });
+        repository.wait_until(cx, "everything staged", |panel| {
+            is_staged(panel, "tracked.txt") && is_staged(panel, "new.txt")
+        });
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            ["new.txt", "tracked.txt"]
+        );
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.commit_editor.update(cx, |editor, cx| {
+                editor.set_text("Add panel changes", window, cx);
+            });
+            panel.commit_changes(CommitOptions::default(), window, cx);
+        });
+        for _ in 0..200 {
+            cx.executor().run_until_parked();
+            if run_git(path, &["rev-list", "--count", "HEAD"]).trim() == "2" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert_eq!(
+            run_git(path, &["log", "-1", "--format=%s"]).trim(),
+            "Add panel changes"
+        );
+        assert_eq!(
+            run_git(path, &["status", "--porcelain"]),
+            "",
+            "the commit should leave a clean working tree"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_unstage_all_against_real_repository(cx: &mut TestAppContext) {
+        let repository = RealRepository::new(cx, false, populate_two_files).await;
+        let cx = &mut repository.visual_cx(cx);
+        let panel = &repository.panel;
+        let path = &repository.path;
+
+        repository.wait_until(cx, "both changes listed", |panel| panel.entry_count == 2);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.stage_all(&StageAll, window, cx);
+        });
+        repository.wait_until(cx, "everything staged", |panel| {
+            is_staged(panel, "tracked.txt") && is_staged(panel, "new.txt")
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.unstage_all(&UnstageAll, window, cx);
+        });
+        repository.wait_until(cx, "everything unstaged", |panel| {
+            is_unstaged(panel, "tracked.txt") && is_unstaged(panel, "new.txt")
+        });
+
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
+            "one\ntwo\n",
+            "unstaging must not touch the working tree"
+        );
+        assert!(path.join("new.txt").exists());
+    }
+
+    #[gpui::test]
+    async fn test_stage_and_unstage_single_file_against_real_repository(cx: &mut TestAppContext) {
+        let repository = RealRepository::new(cx, false, populate_two_files).await;
+        let cx = &mut repository.visual_cx(cx);
+        let panel = &repository.panel;
+        let path = &repository.path;
+
+        repository.wait_until(cx, "both changes listed", |panel| panel.entry_count == 2);
+
+        repository.select("tracked.txt", cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.stage_selected(&git::StageFile, window, cx);
+        });
+        repository.wait_until(cx, "tracked.txt staged", |panel| {
+            is_staged(panel, "tracked.txt") && is_unstaged(panel, "new.txt")
+        });
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            ["tracked.txt"],
+            "only the selected file should be staged"
+        );
+
+        repository.select("tracked.txt", cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.unstage_selected(&git::UnstageFile, window, cx);
+        });
+        repository.wait_until(cx, "tracked.txt unstaged", |panel| {
+            is_unstaged(panel, "tracked.txt")
+        });
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[gpui::test]
+    async fn test_revert_file_against_real_repository(cx: &mut TestAppContext) {
+        let repository = RealRepository::new(cx, false, populate_two_files).await;
+        let cx = &mut repository.visual_cx(cx);
+        let panel = &repository.panel;
+        let path = &repository.path;
+
+        repository.wait_until(cx, "both changes listed", |panel| panel.entry_count == 2);
+
+        repository.select("tracked.txt", cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.revert_selected(&RestoreFile { skip_prompt: true }, window, cx);
+        });
+        repository.wait_until(cx, "tracked.txt reverted", |panel| panel.entry_count == 1);
+
+        assert_eq!(
+            std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
+            "one\n",
+            "reverting should restore the committed contents"
+        );
+        assert_eq!(
+            run_git(path, &["status", "--porcelain"]).trim(),
+            "?? new.txt",
+            "the untracked file must be left alone"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_tree_view_directory_staging_against_real_repository(cx: &mut TestAppContext) {
+        let repository = RealRepository::new(cx, true, |path| {
+            for file in ["src/a/one.txt", "src/b/two.txt"] {
+                std::fs::create_dir_all(path.join(file).parent().unwrap()).unwrap();
+                std::fs::write(path.join(file), "committed\n").unwrap();
+            }
+            run_git(path, &["add", "."]);
+            run_git(path, &["commit", "-m", "Initial commit"]);
+            for file in ["src/a/one.txt", "src/b/two.txt"] {
+                std::fs::write(path.join(file), "changed\n").unwrap();
+            }
+        })
+        .await;
+        let cx = &mut repository.visual_cx(cx);
+        let panel = &repository.panel;
+        let path = &repository.path;
+
+        repository.wait_until(cx, "tree rows listed", |panel| {
+            panel.view_mode.tree_state().is_some()
+                && panel
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, GitListEntry::Directory(_)))
+        });
+
+        let directory_a = repository.directory_entry("src/a", cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.toggle_staged_for_entry(&directory_a, StageIntent::Stage, window, cx);
+        });
+        repository.wait_until(cx, "src/a staged", |panel| {
+            is_staged(panel, "src/a/one.txt") && is_unstaged(panel, "src/b/two.txt")
+        });
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            ["src/a/one.txt"],
+            "staging a directory should only stage the files under it"
+        );
+
+        let source = repository.directory_entry("src", cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.toggle_staged_for_entry(&source, StageIntent::Stage, window, cx);
+        });
+        repository.wait_until(cx, "src staged", |panel| {
+            is_staged(panel, "src/a/one.txt") && is_staged(panel, "src/b/two.txt")
+        });
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            ["src/a/one.txt", "src/b/two.txt"]
+        );
+
+        let source = repository.directory_entry("src", cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.toggle_staged_for_entry(&source, StageIntent::Unstage, window, cx);
+        });
+        repository.wait_until(cx, "src unstaged", |panel| {
+            is_unstaged(panel, "src/a/one.txt") && is_unstaged(panel, "src/b/two.txt")
+        });
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            Vec::<String>::new()
+        );
     }
 
     #[gpui::test]
