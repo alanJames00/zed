@@ -15642,6 +15642,8 @@ mod tests {
             let directory = tempfile::tempdir().expect("failed to create temp directory");
             let path = directory.path().canonicalize().unwrap();
             run_git(&path, &["init", "-b", "main"]);
+            run_git(&path, &["config", "user.name", "test"]);
+            run_git(&path, &["config", "user.email", "test@zed.dev"]);
             populate(&path);
 
             cx.update(|cx| {
@@ -15691,6 +15693,45 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             panic!("git panel never reached the expected state: {description}");
+        }
+
+        /// Polls for a change made outside the panel's own state, such as files
+        /// disappearing from disk.
+        fn wait_for(
+            &self,
+            cx: &mut VisualTestContext,
+            description: &str,
+            condition: impl Fn() -> bool,
+        ) {
+            for _ in 0..200 {
+                cx.executor().run_until_parked();
+                if condition() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("timed out waiting for {description}");
+        }
+
+        fn group_by_staging(&self, cx: &mut VisualTestContext) {
+            cx.update(|_, cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.git_panel.get_or_insert_default().group_by =
+                            Some(settings::GitPanelGroupBy::Staging);
+                    })
+                });
+            });
+        }
+
+        fn select_in_section(&self, path: &str, section: Section, cx: &mut VisualTestContext) {
+            self.panel.update(cx, |panel, _| {
+                panel.selected_entry = panel.entry_by_path_in_section(&repo_path(path), section);
+                assert!(
+                    panel.selected_entry.is_some(),
+                    "{path} has no row in {section:?}"
+                );
+            });
         }
 
         fn project_path(&self, path: &str, cx: &mut VisualTestContext) -> ProjectPath {
@@ -15962,6 +16003,339 @@ mod tests {
         assert_eq!(
             git_lines(path, &["diff", "--cached", "--name-only"]),
             Vec::<String>::new()
+        );
+    }
+
+    fn row_count(panel: &GitPanel, path: &str) -> usize {
+        panel
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .status_entry()
+                    .is_some_and(|status| status.repo_path == repo_path(path))
+            })
+            .count()
+    }
+
+    fn populate_untracked_files(path: &Path) {
+        std::fs::write(path.join("tracked.txt"), "one\n").unwrap();
+        run_git(path, &["add", "tracked.txt"]);
+        run_git(path, &["commit", "-m", "Initial commit"]);
+        std::fs::write(path.join("tracked.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(path.join("untracked_a.txt"), "a\n").unwrap();
+        std::fs::write(path.join("untracked_b.txt"), "b\n").unwrap();
+    }
+
+    #[gpui::test]
+    async fn test_cancelling_trash_keeps_untracked_files_against_real_repository(
+        cx: &mut TestAppContext,
+    ) {
+        let repository = RealRepository::new(cx, false, populate_untracked_files).await;
+        let cx = &mut repository.visual_cx(cx);
+        let path = &repository.path;
+
+        repository.wait_until(cx, "all changes listed", |panel| panel.entry_count == 3);
+        repository.panel.update_in(cx, |panel, window, cx| {
+            panel.clean_all(&TrashUntrackedFiles, window, cx);
+        });
+        cx.executor().run_until_parked();
+        assert!(
+            cx.has_pending_prompt(),
+            "trashing should ask for confirmation"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.executor().run_until_parked();
+
+        assert!(path.join("untracked_a.txt").exists());
+        assert!(path.join("untracked_b.txt").exists());
+        assert_eq!(run_git(path, &["status", "--porcelain"]).lines().count(), 3);
+    }
+
+    /// Trashing really moves files, so the freedesktop trash is redirected into
+    /// a temp directory to keep the test from touching the user's own trash.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    async fn test_trash_untracked_files_against_real_repository(cx: &mut TestAppContext) {
+        let trash_home = tempfile::tempdir().expect("failed to create temp directory");
+        // SAFETY: only this test changes the variable, and the other tests
+        // running in parallel never trash real files or read it.
+        unsafe { std::env::set_var("XDG_DATA_HOME", trash_home.path()) };
+
+        let repository = RealRepository::new(cx, false, populate_untracked_files).await;
+        let cx = &mut repository.visual_cx(cx);
+        let path = &repository.path;
+
+        repository.wait_until(cx, "all changes listed", |panel| panel.entry_count == 3);
+        repository.panel.update_in(cx, |panel, window, cx| {
+            panel.clean_all(&TrashUntrackedFiles, window, cx);
+        });
+        cx.executor().run_until_parked();
+        assert!(
+            cx.has_pending_prompt(),
+            "trashing should ask for confirmation"
+        );
+        cx.simulate_prompt_answer("Trash");
+
+        repository.wait_for(cx, "untracked files to be trashed", || {
+            !path.join("untracked_a.txt").exists() && !path.join("untracked_b.txt").exists()
+        });
+
+        assert!(
+            trash_home
+                .path()
+                .join("Trash/files/untracked_a.txt")
+                .exists()
+        );
+        assert!(
+            trash_home
+                .path()
+                .join("Trash/files/untracked_b.txt")
+                .exists()
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
+            "one\ntwo\n",
+            "tracked changes must survive trashing untracked files"
+        );
+        assert_eq!(
+            run_git(path, &["status", "--porcelain"]).trim(),
+            "M tracked.txt"
+        );
+    }
+
+    fn populate_stash_candidates(path: &Path) {
+        std::fs::write(path.join("unstaged.txt"), "u\n").unwrap();
+        std::fs::write(path.join("staged.txt"), "s\n").unwrap();
+        run_git(path, &["add", "."]);
+        run_git(path, &["commit", "-m", "Initial commit"]);
+        std::fs::write(path.join("unstaged.txt"), "u\nchanged\n").unwrap();
+        std::fs::write(path.join("staged.txt"), "s\nchanged\n").unwrap();
+        run_git(path, &["add", "staged.txt"]);
+        std::fs::write(path.join("untracked.txt"), "new\n").unwrap();
+    }
+
+    async fn stash_with_panel(
+        cx: &mut TestAppContext,
+        kind: StashKind,
+    ) -> (RealRepository, VisualTestContext) {
+        let repository = RealRepository::new(cx, false, populate_stash_candidates).await;
+        let mut visual_cx = repository.visual_cx(cx);
+        repository.wait_until(&mut visual_cx, "all changes listed", |panel| {
+            panel.entry_count == 3
+        });
+        repository.panel.update(&mut visual_cx, |panel, cx| {
+            panel.perform_stash(kind, Some("panel stash".to_string()), cx);
+        });
+        let path = repository.path.clone();
+        repository.wait_for(&mut visual_cx, "the stash to be created", || {
+            !run_git(&path, &["stash", "list"]).is_empty()
+        });
+        (repository, visual_cx)
+    }
+
+    #[gpui::test]
+    async fn test_stash_all_against_real_repository(cx: &mut TestAppContext) {
+        let (repository, mut cx) = stash_with_panel(cx, StashKind::All).await;
+        let path = &repository.path;
+
+        assert!(run_git(path, &["stash", "list", "--format=%s"]).contains("panel stash"));
+        assert_eq!(run_git(path, &["status", "--porcelain"]), "");
+        assert!(
+            !path.join("untracked.txt").exists(),
+            "stashing everything includes untracked files"
+        );
+
+        repository.panel.update_in(&mut cx, |panel, window, cx| {
+            panel.stash_apply(&StashApply, window, cx);
+        });
+        repository.wait_for(&mut cx, "the stash to be applied", || {
+            path.join("untracked.txt").exists()
+        });
+        assert_eq!(
+            std::fs::read_to_string(path.join("unstaged.txt")).unwrap(),
+            "u\nchanged\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("staged.txt")).unwrap(),
+            "s\nchanged\n"
+        );
+        assert_eq!(
+            run_git(path, &["stash", "list"]).lines().count(),
+            1,
+            "applying keeps the stash entry"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_stash_pop_against_real_repository(cx: &mut TestAppContext) {
+        let (repository, mut cx) = stash_with_panel(cx, StashKind::All).await;
+        let path = &repository.path;
+
+        repository.panel.update_in(&mut cx, |panel, window, cx| {
+            panel.stash_pop(&StashPop, window, cx);
+        });
+        repository.wait_for(&mut cx, "the stash to be popped", || {
+            run_git(path, &["stash", "list"]).is_empty()
+        });
+        assert!(path.join("untracked.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(path.join("unstaged.txt")).unwrap(),
+            "u\nchanged\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_stash_tracked_leaves_untracked_files_against_real_repository(
+        cx: &mut TestAppContext,
+    ) {
+        let (repository, _cx) = stash_with_panel(cx, StashKind::Tracked).await;
+        let path = &repository.path;
+
+        assert!(path.join("untracked.txt").exists());
+        assert_eq!(
+            run_git(path, &["status", "--porcelain"]).trim(),
+            "?? untracked.txt"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("unstaged.txt")).unwrap(),
+            "u\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("staged.txt")).unwrap(),
+            "s\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_stash_staged_leaves_other_changes_against_real_repository(
+        cx: &mut TestAppContext,
+    ) {
+        let (repository, _cx) = stash_with_panel(cx, StashKind::Staged).await;
+        let path = &repository.path;
+
+        assert_eq!(
+            std::fs::read_to_string(path.join("staged.txt")).unwrap(),
+            "s\n",
+            "the staged change should be stashed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("unstaged.txt")).unwrap(),
+            "u\nchanged\n",
+            "unstaged changes should stay in the working tree"
+        );
+        assert!(path.join("untracked.txt").exists());
+    }
+
+    fn populate_partially_staged_file(path: &Path) {
+        std::fs::write(path.join("partial.txt"), "one\n").unwrap();
+        run_git(path, &["add", "partial.txt"]);
+        run_git(path, &["commit", "-m", "Initial commit"]);
+        std::fs::write(path.join("partial.txt"), "one\ntwo\n").unwrap();
+        run_git(path, &["add", "partial.txt"]);
+        std::fs::write(path.join("partial.txt"), "one\ntwo\nthree\n").unwrap();
+    }
+
+    async fn partially_staged_repository(
+        cx: &mut TestAppContext,
+    ) -> (RealRepository, VisualTestContext) {
+        let repository = RealRepository::new(cx, false, populate_partially_staged_file).await;
+        let mut visual_cx = repository.visual_cx(cx);
+        repository.group_by_staging(&mut visual_cx);
+        repository.wait_until(&mut visual_cx, "a row in each section", |panel| {
+            row_count(panel, "partial.txt") == 2
+        });
+        (repository, visual_cx)
+    }
+
+    #[gpui::test]
+    async fn test_unstage_partially_staged_file_against_real_repository(cx: &mut TestAppContext) {
+        let (repository, mut cx) = partially_staged_repository(cx).await;
+        let path = &repository.path;
+
+        repository.select_in_section("partial.txt", Section::Staged, &mut cx);
+        repository.panel.update_in(&mut cx, |panel, window, cx| {
+            panel.unstage_selected(&git::UnstageFile, window, cx);
+        });
+        repository.wait_for(&mut cx, "the file to be unstaged", || {
+            run_git(path, &["diff", "--cached", "--name-only"]).is_empty()
+        });
+
+        assert_eq!(
+            std::fs::read_to_string(path.join("partial.txt")).unwrap(),
+            "one\ntwo\nthree\n",
+            "unstaging must keep every edit in the working tree"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_revert_unstaged_half_keeps_staged_changes_against_real_repository(
+        cx: &mut TestAppContext,
+    ) {
+        let (repository, mut cx) = partially_staged_repository(cx).await;
+        let path = &repository.path;
+
+        repository.select_in_section("partial.txt", Section::Unstaged, &mut cx);
+        repository.panel.update_in(&mut cx, |panel, window, cx| {
+            panel.revert_selected(&RestoreFile { skip_prompt: true }, window, cx);
+        });
+        repository.wait_for(&mut cx, "the unstaged edit to be reverted", || {
+            std::fs::read_to_string(path.join("partial.txt")).is_ok_and(|text| text == "one\ntwo\n")
+        });
+
+        assert_eq!(
+            git_lines(path, &["diff", "--cached", "--name-only"]),
+            ["partial.txt"],
+            "the staged half must survive"
+        );
+        assert_eq!(run_git(path, &["diff", "--name-only"]), "");
+    }
+
+    #[gpui::test]
+    async fn test_revert_staged_half_discards_everything_against_real_repository(
+        cx: &mut TestAppContext,
+    ) {
+        let (repository, mut cx) = partially_staged_repository(cx).await;
+        let path = &repository.path;
+
+        repository.select_in_section("partial.txt", Section::Staged, &mut cx);
+        repository.panel.update_in(&mut cx, |panel, window, cx| {
+            panel.revert_selected(&RestoreFile { skip_prompt: true }, window, cx);
+        });
+        repository.wait_for(&mut cx, "the file to be fully reverted", || {
+            std::fs::read_to_string(path.join("partial.txt")).is_ok_and(|text| text == "one\n")
+        });
+
+        assert_eq!(run_git(path, &["status", "--porcelain"]), "");
+    }
+
+    #[gpui::test]
+    async fn test_commit_partially_staged_file_against_real_repository(cx: &mut TestAppContext) {
+        let (repository, mut cx) = partially_staged_repository(cx).await;
+        let path = &repository.path;
+
+        repository.panel.update_in(&mut cx, |panel, window, cx| {
+            panel.commit_editor.update(cx, |editor, cx| {
+                editor.set_text("Commit the staged half", window, cx);
+            });
+            panel.commit_changes(CommitOptions::default(), window, cx);
+        });
+        repository.wait_for(&mut cx, "the commit to land", || {
+            run_git(path, &["rev-list", "--count", "HEAD"]).trim() == "2"
+        });
+
+        assert_eq!(
+            run_git(path, &["show", "HEAD:partial.txt"]),
+            "one\ntwo\n",
+            "only the staged half belongs in the commit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("partial.txt")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+        assert_eq!(
+            run_git(path, &["status", "--porcelain"]).trim(),
+            "M partial.txt"
         );
     }
 
