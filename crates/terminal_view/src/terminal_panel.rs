@@ -2133,14 +2133,22 @@ fn render_pane_buttons(pane: &Pane, pane_handle: Entity<Pane>, cx: &App) -> AnyE
         .and_then(|item| item.downcast::<TerminalView>())
         .map(|terminal_view| terminal_view.read(cx).focus_handle.clone());
     let focus_handle = pane.focus_handle(cx);
+    let search_focus_handle = split_context
+        .clone()
+        .unwrap_or_else(|| focus_handle.clone());
     let zoomed = pane.is_zoomed();
     h_flex()
         .gap(DynamicSpacing::Base02.rems(cx))
         .child(
             IconButton::new("search-terminals", IconName::MagnifyingGlass)
                 .icon_size(IconSize::Small)
-                .tooltip(|_window, cx| {
-                    Tooltip::for_action("Search Terminals", &SearchTerminals, cx)
+                .tooltip(move |_window, cx| {
+                    Tooltip::for_action_in(
+                        "Search Terminals",
+                        &SearchTerminals,
+                        &search_focus_handle,
+                        cx,
+                    )
                 })
                 .on_click(|_, window, cx| {
                     window.dispatch_action(SearchTerminals.boxed_clone(), cx);
