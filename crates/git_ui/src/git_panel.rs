@@ -1779,6 +1779,27 @@ impl GitPanel {
             )
             .detach();
 
+            if let Some(workspace_entity) = workspace.weak_handle().upgrade() {
+                cx.subscribe_in(
+                    &workspace_entity,
+                    window,
+                    |this, workspace_entity, event, window, cx| {
+                        if !matches!(event, workspace::Event::ActiveItemChanged) {
+                            return;
+                        }
+                        let Some(project_path) = workspace_entity
+                            .read(cx)
+                            .active_item(cx)
+                            .and_then(|item| item.project_path(cx))
+                        else {
+                            return;
+                        };
+                        this.select_entry_by_path(project_path, window, cx);
+                    },
+                )
+                .detach();
+            }
+
             let mut this = Self {
                 active_repository,
                 commit_editor,
@@ -11147,6 +11168,29 @@ impl Panel for GitPanel {
 
     fn starts_open(&self, _: &Window, cx: &App) -> bool {
         GitPanelSettings::get_global(cx).starts_open
+    }
+
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !active {
+            return;
+        }
+        // The dock calls this while the workspace is being updated, so reading
+        // the workspace has to wait until the current update finishes.
+        cx.defer_in(window, |this, window, cx| {
+            let Some(project_path) = this
+                .workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace
+                        .active_item(cx)
+                        .and_then(|item| item.project_path(cx))
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+            this.select_entry_by_path(project_path, window, cx);
+        });
     }
 
     fn activation_priority(&self) -> u32 {
