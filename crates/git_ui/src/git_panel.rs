@@ -15590,6 +15590,172 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_panel_follows_active_editor_file(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".git": {},
+                "changed_a.rs": "fn a() {}",
+                "changed_b.rs": "fn b() {}",
+                "unchanged.rs": "fn c() {}",
+            }),
+        )
+        .await;
+        fs.set_status_for_repo(
+            path!("/project/.git").as_ref(),
+            &[
+                ("changed_a.rs", StatusCode::Modified.worktree()),
+                ("changed_b.rs", StatusCode::Modified.worktree()),
+            ],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        let worktree_id =
+            cx.read(|cx| project.read(cx).worktrees(cx).next().unwrap().read(cx).id());
+        let project_path = |path: &str| ProjectPath {
+            worktree_id,
+            path: RelPath::from_unix_str(path).unwrap().into_arc(),
+        };
+        let selected_repo_path = |panel: &Entity<GitPanel>, cx: &mut VisualTestContext| {
+            panel.read_with(cx, |panel, _| {
+                panel
+                    .get_selected_entry()
+                    .and_then(|entry| entry.status_entry())
+                    .map(|entry| entry.repo_path.clone())
+            })
+        };
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path(project_path("changed_b.rs"), None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        cx.executor().run_until_parked();
+        assert_eq!(
+            selected_repo_path(&panel, cx),
+            Some(repo_path("changed_b.rs"))
+        );
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path(project_path("changed_a.rs"), None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        cx.executor().run_until_parked();
+        assert_eq!(
+            selected_repo_path(&panel, cx),
+            Some(repo_path("changed_a.rs"))
+        );
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path(project_path("unchanged.rs"), None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        cx.executor().run_until_parked();
+        assert_eq!(
+            selected_repo_path(&panel, cx),
+            Some(repo_path("changed_a.rs")),
+            "opening a file without changes should keep the previous selection"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_panel_selects_active_editor_file_when_activated(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".git": {},
+                "changed_a.rs": "fn a() {}",
+                "changed_b.rs": "fn b() {}",
+            }),
+        )
+        .await;
+        fs.set_status_for_repo(
+            path!("/project/.git").as_ref(),
+            &[
+                ("changed_a.rs", StatusCode::Modified.worktree()),
+                ("changed_b.rs", StatusCode::Modified.worktree()),
+            ],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.executor().run_until_parked();
+
+        let worktree_id =
+            cx.read(|cx| project.read(cx).worktrees(cx).next().unwrap().read(cx).id());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path(
+                    ProjectPath {
+                        worktree_id,
+                        path: RelPath::from_unix_str("changed_b.rs").unwrap().into_arc(),
+                    },
+                    None,
+                    true,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+
+        // The panel is created after the file is already active, so only
+        // activating the panel can select the file.
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.update_in(cx, |panel, window, cx| {
+            workspace::dock::Panel::set_active(panel, true, window, cx);
+        });
+        cx.executor().run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            let selected = panel
+                .get_selected_entry()
+                .and_then(|entry| entry.status_entry())
+                .map(|entry| entry.repo_path.clone());
+            assert_eq!(selected, Some(repo_path("changed_b.rs")));
+        });
+    }
+
+    #[gpui::test]
     async fn test_tree_view_select_next_at_last_visible_collapsed_directory(
         cx: &mut TestAppContext,
     ) {
